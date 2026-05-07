@@ -59,6 +59,7 @@ const inputClassName =
    'border-white/10 bg-[#111113] text-zinc-100 placeholder:text-zinc-600 shadow-none focus-visible:border-indigo-400/50 focus-visible:ring-indigo-400/25';
 const selectClassName =
    'flex h-9 w-full rounded-md border border-white/10 bg-[#111113] px-3 text-sm text-zinc-200 outline-none transition focus:border-indigo-400/50 focus:ring-2 focus:ring-indigo-400/25 disabled:cursor-not-allowed disabled:opacity-55';
+const menubarReleasesUrl = 'https://github.com/moltycool/taskara/releases';
 
 function isSettingsSection(value?: string): value is SettingsSection {
    return settingsSections.includes(value as SettingsSection);
@@ -666,6 +667,23 @@ function WorkspaceAccessSettingsPage() {
                      )}
                   </InfoRows>
                </SettingsPanel>
+
+               {isWorkspaceAdmin ? (
+                  <SettingsPanel title="اپ منوبار">
+                     <div className="space-y-3 px-4 py-4 text-sm text-zinc-300">
+                        <p className="text-zinc-400">
+                           نسخه macOS اپ منوبار را از صفحه ریلیز دانلود کنید.
+                        </p>
+                        <Button asChild className="w-full border border-white/10 bg-zinc-100 text-zinc-950 hover:bg-white">
+                           <a href={menubarReleasesUrl} target="_blank" rel="noreferrer">
+                              <Download className="size-4" />
+                              دانلود اپ منوبار
+                              <ExternalLink className="size-4" />
+                           </a>
+                        </Button>
+                     </div>
+                  </SettingsPanel>
+               ) : null}
 
                {isWorkspaceAdmin ? (
                   <SettingsPanel title={fa.settings.createUser}>
