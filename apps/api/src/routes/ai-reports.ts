@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { config } from '../config';
 import { getRequestActor, requireWorkspaceAdmin } from '../services/actor';
 import { HttpError } from '../services/http';
-import { assertActorCanAccessTeamSlug, listAccessibleTeamIds } from '../services/team-access';
+import { listAccessibleTeamIds } from '../services/team-access';
 
 const AI_INTEGRATION_PROVIDER = 'CODEX' as const;
 const AI_INTEGRATION_EXTERNAL_ID = 'task-report-ai';
@@ -66,19 +66,26 @@ const aiSettingsDeleteParamsSchema = z.object({
 });
 
 const reportAnalyzeInputSchema = z.object({
-  teamId: z.string().min(1).default('all'),
-  startsAt: z.string().datetime({ offset: true }).optional(),
-  endsAt: z.string().datetime({ offset: true }).optional(),
-  guidance: z.string().trim().max(4000).optional()
-}).superRefine((value, ctx) => {
-  if (!value.startsAt || !value.endsAt) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['startsAt'],
-      message: 'Both startsAt and endsAt must be provided'
-    });
-  }
+  request: z.string().trim().min(3).max(4000)
 });
+
+const TASK_STATUS_VALUES = ['BACKLOG', 'TODO', 'IN_PROGRESS', 'IN_REVIEW', 'BLOCKED', 'DONE', 'CANCELED'] as const;
+const TASK_PRIORITY_VALUES = ['NO_PRIORITY', 'LOW', 'MEDIUM', 'HIGH', 'URGENT'] as const;
+
+const reportQueryPlanSchema = z.object({
+  teamSlug: z.string().trim().min(1).max(80).nullable().optional(),
+  relativeDays: z.number().int().min(1).max(365).nullable().optional(),
+  startsAt: z.string().datetime({ offset: true }).nullable().optional(),
+  endsAt: z.string().datetime({ offset: true }).nullable().optional(),
+  assigneeHint: z.string().trim().min(1).max(120).nullable().optional(),
+  reporterHint: z.string().trim().min(1).max(120).nullable().optional(),
+  statuses: z.array(z.enum(TASK_STATUS_VALUES)).max(TASK_STATUS_VALUES.length).optional().default([]),
+  priorities: z.array(z.enum(TASK_PRIORITY_VALUES)).max(TASK_PRIORITY_VALUES.length).optional().default([]),
+  keywords: z.array(z.string().trim().min(1).max(80)).max(8).optional().default([]),
+  guidance: z.string().trim().min(1).max(1000).nullable().optional()
+});
+
+type ReportQueryPlan = z.infer<typeof reportQueryPlanSchema>;
 
 interface AiCredentialItem {
   credentialId: string;
@@ -127,6 +134,18 @@ interface AiUsageSnapshot {
 interface AiAnalysisResult {
   content: string;
   usage: AiUsageSnapshot;
+}
+
+interface ResolvedQueryFilters {
+  request: string;
+  teamSlug: string | null;
+  teamName: string | null;
+  assigneeHint: string | null;
+  reporterHint: string | null;
+  statuses: string[];
+  priorities: string[];
+  keywords: string[];
+  guidance: string | null;
 }
 
 function defaultModelForProvider(provider: ReportAiProvider): string {
@@ -479,23 +498,195 @@ async function setActiveCredential(
   }
 }
 
-function resolveDateRange(input: z.infer<typeof reportAnalyzeInputSchema>): ReportDateRange {
-  const startsAt = new Date(input.startsAt || '');
-  const endsAt = new Date(input.endsAt || '');
+function normalizeSearchText(value: string): string {
+  return value
+    .normalize('NFKC')
+    .replace(/[\u064A\u06CC]/g, 'ی')
+    .replace(/[\u0643\u06A9]/g, 'ک')
+    .replace(/[\u200c\u200f\u200e]/g, '')
+    .replace(/[^\p{L}\p{N}@._-]+/gu, ' ')
+    .trim()
+    .toLocaleLowerCase('fa-IR');
+}
+
+function parseStatusHints(query: string): Array<(typeof TASK_STATUS_VALUES)[number]> {
+  const text = normalizeSearchText(query);
+  const hits: Array<(typeof TASK_STATUS_VALUES)[number]> = [];
+  const add = (value: (typeof TASK_STATUS_VALUES)[number]) => {
+    if (!hits.includes(value)) hits.push(value);
+  };
+
+  if (/(blocked|مسدود|گیر|گلوگاه)/i.test(text)) add('BLOCKED');
+  if (/(done|completed|انجام|بسته|تمام)/i.test(text)) add('DONE');
+  if (/(todo|باز|انجام نشده)/i.test(text)) add('TODO');
+  if (/(review|بازبینی|بررسی)/i.test(text)) add('IN_REVIEW');
+  if (/(progress|در حال انجام|in progress)/i.test(text)) add('IN_PROGRESS');
+  if (/(backlog|بک لاگ)/i.test(text)) add('BACKLOG');
+  if (/(cancel|لغو)/i.test(text)) add('CANCELED');
+  return hits;
+}
+
+function parsePriorityHints(query: string): Array<(typeof TASK_PRIORITY_VALUES)[number]> {
+  const text = normalizeSearchText(query);
+  const hits: Array<(typeof TASK_PRIORITY_VALUES)[number]> = [];
+  const add = (value: (typeof TASK_PRIORITY_VALUES)[number]) => {
+    if (!hits.includes(value)) hits.push(value);
+  };
+
+  if (/(urgent|فوری)/i.test(text)) add('URGENT');
+  if (/(high|بالا)/i.test(text)) add('HIGH');
+  if (/(medium|متوسط)/i.test(text)) add('MEDIUM');
+  if (/(low|پایین)/i.test(text)) add('LOW');
+  if (/(no priority|بدون اولویت)/i.test(text)) add('NO_PRIORITY');
+  return hits;
+}
+
+function extractFirstJsonObject(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [fenced?.[1], trimmed];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const source = candidate.trim();
+    for (let i = 0; i < source.length; i += 1) {
+      if (source[i] !== '{') continue;
+      let depth = 0;
+      for (let j = i; j < source.length; j += 1) {
+        if (source[j] === '{') depth += 1;
+        if (source[j] === '}') {
+          depth -= 1;
+          if (depth === 0) {
+            const slice = source.slice(i, j + 1);
+            try {
+              const parsed = JSON.parse(slice) as unknown;
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                return parsed as Record<string, unknown>;
+              }
+            } catch {
+              // Ignore parsing errors and keep scanning.
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function resolveDateRangeFromPlan(plan: ReportQueryPlan): ReportDateRange {
+  const now = new Date();
+  const fallbackDays = plan.relativeDays && Number.isFinite(plan.relativeDays) ? plan.relativeDays : 30;
+  const days = Math.max(1, Math.min(365, Math.floor(fallbackDays)));
+
+  const endsAt = plan.endsAt ? new Date(plan.endsAt) : now;
+  const startsAt = plan.startsAt ? new Date(plan.startsAt) : new Date(endsAt.getTime() - days * 24 * 60 * 60 * 1000);
 
   if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime()) || startsAt >= endsAt) {
-    throw new HttpError(400, 'Invalid report date range');
+    const safeEndsAt = now;
+    const safeStartsAt = new Date(safeEndsAt.getTime() - 30 * 24 * 60 * 60 * 1000);
+    return { startsAt: safeStartsAt, endsAt: safeEndsAt };
   }
 
   return { startsAt, endsAt };
 }
 
+function fallbackQueryPlan(requestText: string): ReportQueryPlan {
+  return {
+    teamSlug: null,
+    relativeDays: 30,
+    assigneeHint: null,
+    reporterHint: null,
+    statuses: parseStatusHints(requestText),
+    priorities: parsePriorityHints(requestText),
+    keywords: [],
+    guidance: requestText.slice(0, 1000)
+  };
+}
+
+async function requestQueryPlan(params: {
+  provider: ReportAiProvider;
+  apiKey: string;
+  model: string;
+  requestText: string;
+  teams: Array<{ slug: string; name: string }>;
+}): Promise<{ plan: ReportQueryPlan; usage: AiUsageSnapshot | null }> {
+  const teamsText = params.teams.length
+    ? params.teams.map((team) => `- ${team.slug} | ${team.name}`).join('\n')
+    : '- (no teams)';
+
+  const planningPrompt = [
+    'در نقش planner عمل کن و فقط JSON معتبر برگردان.',
+    'هدف: از متن کاربر، فیلترهای لازم برای گزارش تسک را استخراج کن.',
+    'مقادیر status فقط از این لیست باشند:',
+    TASK_STATUS_VALUES.join(', '),
+    'مقادیر priority فقط از این لیست باشند:',
+    TASK_PRIORITY_VALUES.join(', '),
+    'teamSlug فقط از اسلاگ‌های زیر انتخاب شود، و اگر معلوم نبود null بگذار:',
+    teamsText,
+    '',
+    'فرمت خروجی JSON:',
+    '{',
+    '  "teamSlug": string|null,',
+    '  "relativeDays": number|null,',
+    '  "startsAt": string|null,',
+    '  "endsAt": string|null,',
+    '  "assigneeHint": string|null,',
+    '  "reporterHint": string|null,',
+    `  "statuses": string[], // subset of ${TASK_STATUS_VALUES.join(', ')}`,
+    `  "priorities": string[], // subset of ${TASK_PRIORITY_VALUES.join(', ')}`,
+    '  "keywords": string[],',
+    '  "guidance": string|null',
+    '}',
+    '',
+    'قواعد:',
+    '1) اگر بازه زمانی مشخص نبود relativeDays=30 بگذار.',
+    '2) اگر تاریخ absolute تشخیص دادی startsAt/endsAt را ISO 8601 با timezone بده.',
+    '3) اگر چیزی قطعی نبود null یا آرایه خالی بده.',
+    '4) فقط JSON بده و هیچ متن اضافی نده.',
+    '',
+    `متن کاربر: ${params.requestText}`
+  ].join('\n');
+
+  try {
+    const planningResult = await generateAnalysis(
+      params.provider,
+      params.apiKey,
+      params.model,
+      planningPrompt,
+      null
+    );
+
+    const parsedJson = extractFirstJsonObject(planningResult.content);
+    if (!parsedJson) {
+      return { plan: fallbackQueryPlan(params.requestText), usage: planningResult.usage };
+    }
+
+    const parsedPlan = reportQueryPlanSchema.parse(parsedJson);
+    return { plan: parsedPlan, usage: planningResult.usage };
+  } catch {
+    return { plan: fallbackQueryPlan(params.requestText), usage: null };
+  }
+}
+
+function resolveTeamFromPlan(
+  teamSlug: string | null | undefined,
+  teams: Array<{ id: string; slug: string; name: string }>
+): { id: string; slug: string; name: string } | null {
+  if (!teamSlug) return null;
+  const normalized = normalizeSearchText(teamSlug);
+  if (!normalized) return null;
+  return teams.find((team) => normalizeSearchText(team.slug) === normalized) || null;
+}
+
 function buildReportPrompt(params: {
   startsAt: Date;
   endsAt: Date;
-  guidance?: string;
+  guidance?: string | null;
   workspaceName: string;
-  teamId: string;
+  teamLabel: string;
+  appliedFilters: ResolvedQueryFilters;
   summary: Record<string, unknown>;
   tasks: Array<Record<string, unknown>>;
   truncated: boolean;
@@ -516,10 +707,17 @@ function buildReportPrompt(params: {
     '3) ریسک‌ها و گلوگاه‌ها',
     '4) پیشنهادهای عملی اولویت‌بندی‌شده',
     '5) شاخص‌های پیشنهادی برای پایش بعدی',
+    '6) تحلیل باید فقط روی همین فیلترهای اعمال‌شده باشد و هیچ فرض اضافه نسازد.',
     '',
     `فضای کاری: ${params.workspaceName}`,
-    `تیم انتخابی: ${params.teamId === 'all' ? 'همه تیم‌ها' : params.teamId}`,
+    `تیم انتخابی: ${params.teamLabel}`,
     `بازه گزارش: ${periodLabel}`,
+    `درخواست خام کاربر: ${params.appliedFilters.request}`,
+    params.appliedFilters.assigneeHint ? `فیلتر مسئول: ${params.appliedFilters.assigneeHint}` : 'فیلتر مسئول: (ندارد)',
+    params.appliedFilters.reporterHint ? `فیلتر گزارش‌دهنده: ${params.appliedFilters.reporterHint}` : 'فیلتر گزارش‌دهنده: (ندارد)',
+    params.appliedFilters.statuses.length ? `فیلتر وضعیت: ${params.appliedFilters.statuses.join(', ')}` : 'فیلتر وضعیت: (ندارد)',
+    params.appliedFilters.priorities.length ? `فیلتر اولویت: ${params.appliedFilters.priorities.join(', ')}` : 'فیلتر اولویت: (ندارد)',
+    params.appliedFilters.keywords.length ? `کلیدواژه‌ها: ${params.appliedFilters.keywords.join(', ')}` : 'کلیدواژه‌ها: (ندارد)',
     guidance,
     '',
     'خلاصه عددی:',
@@ -857,7 +1055,6 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
   app.post('/reports/tasks/analyze', async (request) => {
     const actor = await getRequestActor(request);
     const input = reportAnalyzeInputSchema.parse(request.body);
-    const range = resolveDateRange(input);
 
     const accounts = await loadAiCredentialAccounts(actor.workspace.id);
     const selectedCredential = resolveActiveCredential(accounts);
@@ -875,6 +1072,37 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
       ? normalizeOpenRouterModel(actor.user.aiModel)
       : aiConfig.model;
     const accessibleTeamIds = await listAccessibleTeamIds(actor);
+    const accessibleTeams = await prisma.team.findMany({
+      where: {
+        workspaceId: actor.workspace.id,
+        ...(accessibleTeamIds ? { id: { in: accessibleTeamIds } } : {})
+      },
+      select: { id: true, slug: true, name: true },
+      orderBy: [{ name: 'asc' }]
+    });
+
+    const planner = await requestQueryPlan({
+      provider: aiConfig.provider,
+      apiKey: storedApiKey,
+      model: effectiveModel,
+      requestText: input.request,
+      teams: accessibleTeams.map((team) => ({ slug: team.slug, name: team.name }))
+    });
+    if (planner.usage) await recordUsageStats(selectedCredential.id, planner.usage);
+    const range = resolveDateRangeFromPlan(planner.plan);
+    const selectedTeam = resolveTeamFromPlan(planner.plan.teamSlug, accessibleTeams);
+
+    const appliedFilters: ResolvedQueryFilters = {
+      request: input.request,
+      teamSlug: selectedTeam?.slug || null,
+      teamName: selectedTeam?.name || null,
+      assigneeHint: planner.plan.assigneeHint || null,
+      reporterHint: planner.plan.reporterHint || null,
+      statuses: planner.plan.statuses || [],
+      priorities: planner.plan.priorities || [],
+      keywords: planner.plan.keywords || [],
+      guidance: planner.plan.guidance || input.request
+    };
 
     const where: Prisma.TaskWhereInput = {
       workspaceId: actor.workspace.id,
@@ -885,17 +1113,57 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
       ]
     };
 
-    if (input.teamId !== 'all') {
-      await assertActorCanAccessTeamSlug(actor, input.teamId);
-      where.project = {
-        team: {
-          workspaceId: actor.workspace.id,
-          slug: input.teamId
-        }
-      };
+    if (selectedTeam) {
+      where.project = { teamId: selectedTeam.id };
     } else if (accessibleTeamIds) {
       where.project = { OR: [{ teamId: null }, { teamId: { in: accessibleTeamIds } }] };
     }
+
+    const andFilters: Prisma.TaskWhereInput[] = [];
+    if (appliedFilters.statuses.length > 0) {
+      andFilters.push({ status: { in: appliedFilters.statuses as Array<(typeof TASK_STATUS_VALUES)[number]> } });
+    }
+    if (appliedFilters.priorities.length > 0) {
+      andFilters.push({ priority: { in: appliedFilters.priorities as Array<(typeof TASK_PRIORITY_VALUES)[number]> } });
+    }
+    if (appliedFilters.assigneeHint) {
+      andFilters.push({
+        assignee: {
+          is: {
+            OR: [
+              { name: { contains: appliedFilters.assigneeHint, mode: 'insensitive' } },
+              { email: { contains: appliedFilters.assigneeHint, mode: 'insensitive' } }
+            ]
+          }
+        }
+      });
+    }
+    if (appliedFilters.reporterHint) {
+      andFilters.push({
+        reporter: {
+          is: {
+            OR: [
+              { name: { contains: appliedFilters.reporterHint, mode: 'insensitive' } },
+              { email: { contains: appliedFilters.reporterHint, mode: 'insensitive' } }
+            ]
+          }
+        }
+      });
+    }
+    if (appliedFilters.keywords.length > 0) {
+      const keywordOr = appliedFilters.keywords.flatMap((keyword) => ([
+        { title: { contains: keyword, mode: 'insensitive' as const } },
+        { description: { contains: keyword, mode: 'insensitive' as const } },
+        { key: { contains: keyword, mode: 'insensitive' as const } },
+        { project: { name: { contains: keyword, mode: 'insensitive' as const } } },
+        { labels: { some: { label: { name: { contains: keyword, mode: 'insensitive' as const } } } } }
+      ] satisfies Prisma.TaskWhereInput[]));
+
+      if (keywordOr.length > 0) {
+        andFilters.push({ OR: keywordOr });
+      }
+    }
+    if (andFilters.length > 0) where.AND = andFilters;
 
     const tasks = await prisma.task.findMany({
       where,
@@ -925,13 +1193,15 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
       take: 600
     });
 
+    const filteredTasks = tasks;
+
     const statusCounts = new Map<string, number>();
     const priorityCounts = new Map<string, number>();
     let doneCount = 0;
     let blockedCount = 0;
     let overdueCount = 0;
 
-    for (const task of tasks) {
+    for (const task of filteredTasks) {
       statusCounts.set(task.status, (statusCounts.get(task.status) || 0) + 1);
       priorityCounts.set(task.priority, (priorityCounts.get(task.priority) || 0) + 1);
       if (task.status === 'DONE') doneCount += 1;
@@ -942,7 +1212,7 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
     }
 
     const byAssignee = new Map<string, { name: string; total: number; done: number }>();
-    for (const task of tasks) {
+    for (const task of filteredTasks) {
       const key = task.assigneeId || 'unassigned';
       const name = task.assignee?.name || 'بدون مسئول';
       const current = byAssignee.get(key) || { name, total: 0, done: 0 };
@@ -958,7 +1228,7 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
       })
       .slice(0, 8);
 
-    const taskSamples = tasks.slice(0, 250).map((task) => ({
+    const taskSamples = filteredTasks.slice(0, 250).map((task) => ({
       key: task.key,
       title: task.title,
       status: task.status,
@@ -974,11 +1244,11 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
     }));
 
     const summary = {
-      totalTasks: tasks.length,
+      totalTasks: filteredTasks.length,
       doneTasks: doneCount,
       blockedTasks: blockedCount,
       overdueOpenTasks: overdueCount,
-      completionRate: tasks.length > 0 ? Number((doneCount / tasks.length).toFixed(4)) : 0,
+      completionRate: filteredTasks.length > 0 ? Number((doneCount / filteredTasks.length).toFixed(4)) : 0,
       statusCounts: Object.fromEntries(statusCounts),
       priorityCounts: Object.fromEntries(priorityCounts),
       topAssignees
@@ -987,12 +1257,13 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
     const prompt = buildReportPrompt({
       startsAt: range.startsAt,
       endsAt: range.endsAt,
-      guidance: input.guidance,
+      guidance: appliedFilters.guidance,
       workspaceName: actor.workspace.name,
-      teamId: input.teamId,
+      teamLabel: selectedTeam ? `${selectedTeam.name} (${selectedTeam.slug})` : 'همه تیم‌ها',
+      appliedFilters,
       summary,
       tasks: taskSamples,
-      truncated: tasks.length > taskSamples.length
+      truncated: filteredTasks.length > taskSamples.length
     });
 
     const result = await generateAnalysis(
@@ -1012,7 +1283,17 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
       summary,
       report: result.content,
       sampleSize: taskSamples.length,
-      totalMatchedTasks: tasks.length,
+      totalMatchedTasks: filteredTasks.length,
+      appliedFilters,
+      resolvedQuery: {
+        request: input.request,
+        startsAt: range.startsAt.toISOString(),
+        endsAt: range.endsAt.toISOString(),
+        teamSlug: selectedTeam?.slug || null,
+        statuses: appliedFilters.statuses,
+        priorities: appliedFilters.priorities,
+        keywords: appliedFilters.keywords
+      },
       ai: {
         provider: aiConfig.provider,
         model: effectiveModel,
