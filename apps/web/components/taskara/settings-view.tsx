@@ -876,26 +876,6 @@ function AppearanceSettingsPage() {
                </div>
             </SettingsField>
 
-            <SettingsField label="اندازه تیترها" description="از ۸۵٪ تا ۱۴۵٪">
-               <div className="flex items-center gap-3">
-                  <input
-                     className="h-2 w-full cursor-pointer appearance-none rounded-full bg-white/10 accent-[var(--primary)]"
-                     max={145}
-                     min={85}
-                     step={1}
-                     type="range"
-                     value={Math.round(settings.titleFontScale * 100)}
-                     onChange={(event) =>
-                        setSettings({
-                           titleFontScale: Number(event.target.value) / 100,
-                        })
-                     }
-                  />
-                  <span className="min-w-[52px] text-left text-xs text-zinc-400">
-                     {Math.round(settings.titleFontScale * 100)}%
-                  </span>
-               </div>
-            </SettingsField>
          </SettingsPanel>
       </div>
    );

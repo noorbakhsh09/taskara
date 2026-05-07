@@ -167,6 +167,7 @@ function getSystemViewKey(viewKey: ActiveViewKey): SystemViewKey | null {
 
 const activeViewQueryParam = 'view';
 const activeViewStoragePrefix = 'taskara:tasks-active-view';
+const taskDraftViewStoragePrefix = 'taskara:tasks-draft-view';
 const taskComposerPreferenceStoragePrefix = 'taskara:task-composer-preferences';
 const issueListScrollStoragePrefix = 'taskara:issue-list-scroll';
 const issueListScrollSnapshotMaxAgeMs = 30 * 60 * 1000;
@@ -200,6 +201,10 @@ function taskComposerPreferenceStorageKey(workspaceKey: string, teamKey: string)
    return `${taskComposerPreferenceStoragePrefix}:${workspaceKey}:${teamKey}`;
 }
 
+function taskDraftViewStorageKey(workspaceKey: string, teamKey: string, viewKey: ActiveViewKey) {
+   return `${taskDraftViewStoragePrefix}:${workspaceKey}:${teamKey}:${viewKey}`;
+}
+
 function issueListScrollStorageKey(pathname: string, search: string, hash: string) {
    return `${issueListScrollStoragePrefix}:${pathname}${search}${hash}`;
 }
@@ -219,6 +224,35 @@ function readStoredActiveViewKey(workspaceKey: string, teamKey: string): ActiveV
 function writeStoredActiveViewKey(workspaceKey: string, teamKey: string, viewKey: ActiveViewKey) {
    if (typeof window === 'undefined') return;
    window.localStorage.setItem(taskViewSelectionStorageKey(workspaceKey, teamKey), viewKey);
+}
+
+function readStoredTaskDraftView(
+   workspaceKey: string,
+   teamKey: string,
+   viewKey: ActiveViewKey
+): TaskaraTaskViewState | null {
+   if (typeof window === 'undefined') return null;
+   const raw = window.localStorage.getItem(taskDraftViewStorageKey(workspaceKey, teamKey, viewKey));
+   if (!raw) return null;
+   try {
+      const parsed = JSON.parse(raw) as TaskaraTaskViewState;
+      return parsed && typeof parsed === 'object' ? parsed : null;
+   } catch {
+      return null;
+   }
+}
+
+function writeStoredTaskDraftView(
+   workspaceKey: string,
+   teamKey: string,
+   viewKey: ActiveViewKey,
+   state: TaskaraTaskViewState
+) {
+   if (typeof window === 'undefined') return;
+   window.localStorage.setItem(
+      taskDraftViewStorageKey(workspaceKey, teamKey, viewKey),
+      JSON.stringify(state)
+   );
 }
 
 function readStoredTaskComposerPreferences(
@@ -921,8 +955,18 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       const systemViewKey = getSystemViewKey(requestedViewKey);
 
       if (systemViewKey) {
+         const systemActiveViewKey: ActiveViewKey = `system:${systemViewKey}`;
+         const storedDraftView = readStoredTaskDraftView(
+            workspaceKey,
+            viewScopeKey,
+            systemActiveViewKey
+         );
          setActiveViewKey(`system:${systemViewKey}`);
-         setDraftView(buildSystemViewState(systemViewKey, currentTeamKey));
+         setDraftView(
+            storedDraftView
+               ? normalizeViewState(storedDraftView, currentTeamKey)
+               : buildSystemViewState(systemViewKey, currentTeamKey)
+         );
          setSelectedTaskId(null);
          setHighlightedIndex(null);
          restoredViewRequestRef.current = viewRestoreRequestKey;
@@ -931,8 +975,13 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
 
       const savedView = visibleViews.find((view) => view.id === requestedViewKey);
       if (savedView) {
+         const storedDraftView = readStoredTaskDraftView(workspaceKey, viewScopeKey, savedView.id);
          setActiveViewKey(savedView.id);
-         setDraftView(normalizeViewState(savedView.state, currentTeamKey));
+         setDraftView(
+            storedDraftView
+               ? normalizeViewState(storedDraftView, currentTeamKey)
+               : normalizeViewState(savedView.state, currentTeamKey)
+         );
          setSelectedTaskId(null);
          setHighlightedIndex(null);
          restoredViewRequestRef.current = viewRestoreRequestKey;
@@ -942,7 +991,16 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       if (loading) return;
 
       setActiveViewKey(defaultActiveViewKey);
-      setDraftView(buildSystemViewState(defaultSystemView, currentTeamKey));
+      const storedDraftView = readStoredTaskDraftView(
+         workspaceKey,
+         viewScopeKey,
+         defaultActiveViewKey
+      );
+      setDraftView(
+         storedDraftView
+            ? normalizeViewState(storedDraftView, currentTeamKey)
+            : buildSystemViewState(defaultSystemView, currentTeamKey)
+      );
       setSelectedTaskId(null);
       setHighlightedIndex(null);
       writeStoredActiveViewKey(workspaceKey, viewScopeKey, defaultActiveViewKey);
@@ -958,6 +1016,11 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       visibleViews,
       workspaceKey,
    ]);
+
+   useEffect(() => {
+      if (restoredViewRequestRef.current !== viewRestoreRequestKey) return;
+      writeStoredTaskDraftView(workspaceKey, viewScopeKey, activeViewKey, draftView);
+   }, [activeViewKey, draftView, viewRestoreRequestKey, viewScopeKey, workspaceKey]);
 
    const scopedProjects = useMemo(
       () =>
