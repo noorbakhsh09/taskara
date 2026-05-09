@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { taskaraRequest } from '@/lib/taskara-client';
 import { cn } from '@/lib/utils';
+import { useAuthSession } from '@/store/auth-store';
 
 type AssistantMessageRole = 'assistant' | 'user';
 type AssistantMessageStatus = 'completed' | 'blocked' | 'needs_clarification' | 'unsupported';
@@ -38,23 +39,32 @@ interface AssistantApiResponse {
    };
 }
 
+interface AiSettingsSummary {
+   model: string;
+}
+
 const initialMessages: AssistantMessage[] = [
    {
       id: 'assistant-welcome',
       role: 'assistant',
-      content: 'درخواستت را بنویس یا با میکروفون بگو. اگر بخشی از دستور ناقص باشد، پیام بعدی‌ات به‌عنوان ادامه همین گفتگو پردازش می‌شود.',
+      content: 'آماده دریافت و انجام کار هستم. درخواستت را بنویس یا با میکروفون بگو تا شروع کنم.',
    },
 ];
 
+const fallbackAiModel = 'x-ai/grok-4.1-fast';
+
 export function AiAssistantDock() {
+   const { session } = useAuthSession();
    const [open, setOpen] = React.useState(false);
    const [messages, setMessages] = React.useState<AssistantMessage[]>(initialMessages);
    const [draft, setDraft] = React.useState('');
    const [submitting, setSubmitting] = React.useState(false);
    const [recording, setRecording] = React.useState(false);
+   const [workspaceAiModel, setWorkspaceAiModel] = React.useState<string | null>(null);
    const recorderRef = React.useRef<MediaRecorder | null>(null);
    const chunksRef = React.useRef<BlobPart[]>([]);
    const messagesEndRef = React.useRef<HTMLDivElement | null>(null);
+   const assistantModel = session?.user.aiModel?.trim() || workspaceAiModel || fallbackAiModel;
    const voiceSupported =
       typeof window !== 'undefined' &&
       typeof MediaRecorder !== 'undefined' &&
@@ -70,6 +80,24 @@ export function AiAssistantDock() {
          recorderRef.current?.stop();
       };
    }, []);
+
+   React.useEffect(() => {
+      if (!open || session?.user.aiModel?.trim()) return;
+
+      let cancelled = false;
+
+      void taskaraRequest<AiSettingsSummary>('/ai/settings')
+         .then((settings) => {
+            if (!cancelled) setWorkspaceAiModel(settings.model || fallbackAiModel);
+         })
+         .catch(() => {
+            if (!cancelled) setWorkspaceAiModel(fallbackAiModel);
+         });
+
+      return () => {
+         cancelled = true;
+      };
+   }, [open, session?.user.aiModel]);
 
    async function submitTextMessage(event?: React.FormEvent<HTMLFormElement>) {
       event?.preventDefault();
@@ -219,7 +247,9 @@ export function AiAssistantDock() {
                      </span>
                      <div className="min-w-0">
                         <div className="truncate text-sm font-semibold text-zinc-100">دستیار AI</div>
-                        <div className="truncate text-xs text-zinc-500">اجرای امن فرمان‌های تسک</div>
+                        <div className="truncate text-xs text-zinc-500">
+                           مدل: <span dir="ltr">{assistantModel}</span>
+                        </div>
                      </div>
                   </div>
                   <Button

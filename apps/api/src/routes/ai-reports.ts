@@ -7,7 +7,6 @@ import { getRequestActor, requireWorkspaceAdmin } from '../services/actor';
 import { HttpError } from '../services/http';
 import { listAccessibleTeamIds } from '../services/team-access';
 import {
-  addTaskComment,
   addTaskProgressStartedAt,
   createTask,
   findTaskByIdOrKey,
@@ -79,7 +78,8 @@ const reportAnalyzeInputSchema = z.object({
 
 const TASK_STATUS_VALUES = ['BACKLOG', 'TODO', 'IN_PROGRESS', 'IN_REVIEW', 'BLOCKED', 'DONE', 'CANCELED'] as const;
 const TASK_PRIORITY_VALUES = ['NO_PRIORITY', 'LOW', 'MEDIUM', 'HIGH', 'URGENT'] as const;
-const assistantActionValues = ['create_task', 'update_task', 'comment_task', 'clarify', 'unsupported'] as const;
+const assistantActionValues = ['create_task', 'update_task', 'clarify', 'unsupported'] as const;
+const assistantOperationValues = ['create_task', 'update_task'] as const;
 
 const aiAssistantMessageSchema = z.object({
   message: z.string().trim().max(4000).default(''),
@@ -137,18 +137,18 @@ const assistantTaskUpdateSchema = z.object({
   labels: z.array(z.string().trim().min(1).max(40)).max(12).optional()
 });
 
-const assistantTaskCommentSchema = z.object({
-  taskKeyOrId: z.string().trim().min(1).max(120).nullable().optional(),
-  taskHint: z.string().trim().min(1).max(160).nullable().optional(),
-  body: z.string().trim().min(1).max(15000).nullable().optional()
+const assistantActionStepSchema = z.object({
+  operation: z.enum(assistantOperationValues),
+  task: assistantTaskDraftSchema.nullable().optional(),
+  update: assistantTaskUpdateSchema.nullable().optional()
 });
 
 const assistantCommandPlanSchema = z.object({
   action: z.enum(assistantActionValues),
   response: z.string().trim().min(1).max(1000).nullable().optional(),
+  actions: z.array(assistantActionStepSchema).max(20).optional().default([]),
   task: assistantTaskDraftSchema.nullable().optional(),
-  update: assistantTaskUpdateSchema.nullable().optional(),
-  comment: assistantTaskCommentSchema.nullable().optional()
+  update: assistantTaskUpdateSchema.nullable().optional()
 });
 
 const reportQueryPlanSchema = z.object({
@@ -216,9 +216,9 @@ interface AiAnalysisResult {
 }
 
 type AssistantCommandPlan = z.infer<typeof assistantCommandPlanSchema>;
+type AssistantActionStep = z.infer<typeof assistantActionStepSchema>;
 type AssistantTaskDraft = z.infer<typeof assistantTaskDraftSchema>;
 type AssistantTaskUpdate = z.infer<typeof assistantTaskUpdateSchema>;
-type AssistantTaskComment = z.infer<typeof assistantTaskCommentSchema>;
 type AssistantResultStatus = 'completed' | 'blocked' | 'needs_clarification' | 'unsupported';
 
 interface AssistantProjectContext {
@@ -1037,12 +1037,11 @@ async function generateAssistantCommandPlan(params: {
 
   const prompt = [
     'تو planner اجرایی Taskara هستی. فقط JSON معتبر برگردان و هیچ متن اضافی ننویس.',
-    'وظیفه: پیام فارسی یا انگلیسی کاربر را به یک عملیات امن و محدود تبدیل کن.',
+    'وظیفه: پیام فارسی یا انگلیسی کاربر را به یک یا چند عملیات امن و محدود تبدیل کن.',
     '',
     'عملیات‌های مجاز:',
     '- create_task: ساخت یک تسک',
     '- update_task: ویرایش یک تسک موجود',
-    '- comment_task: افزودن کامنت به یک تسک',
     '- clarify: وقتی اطلاعات ضروری کم است',
     '- unsupported: وقتی درخواست خارج از این عملیات‌هاست یا خطرناک/گروهی/نامطمئن است',
     '',
@@ -1050,20 +1049,28 @@ async function generateAssistantCommandPlan(params: {
     '1) فقط از projectId و userIdهای موجود در context استفاده کن. ID جدید نساز.',
     '2) اگر کاربر گفت پروژه ۲ یا کاربر ۳، index متناظر در context را انتخاب کن.',
     '3) عبارت‌هایی مثل سینک به کاربر، assign، مسئول، بسپار به، یعنی assigneeId.',
-    '4) اگر عنوان تسک معلوم نیست action=clarify.',
-    '5) اگر پروژه برای ساخت تسک معلوم نیست action=clarify، مگر فقط یک پروژه در context باشد.',
-    '6) تاریخ‌های نسبی را با now و timezone داده‌شده به ISO 8601 همراه offset تبدیل کن.',
-    '7) مقدار priority فقط یکی از این‌ها باشد:',
+    '4) اگر پیام چند کار مستقل دارد، در actions همه را به ترتیب بیاور.',
+    '5) اگر عنوان تسک معلوم نیست action=clarify.',
+    '6) اگر پروژه برای ساخت تسک معلوم نیست action=clarify، مگر فقط یک پروژه در context باشد.',
+    '7) تاریخ‌های نسبی را با now و timezone داده‌شده به ISO 8601 همراه offset تبدیل کن.',
+    '8) مقدار priority فقط یکی از این‌ها باشد:',
     TASK_PRIORITY_VALUES.join(', '),
-    '8) مقدار status فقط یکی از این‌ها باشد:',
+    '9) مقدار status فقط یکی از این‌ها باشد:',
     TASK_STATUS_VALUES.join(', '),
-    '9) حذف، تغییرات گروهی، مدیریت کاربر/تیم/پروژه، یا کار نامطمئن را unsupported کن.',
-    '10) response را فارسی و کوتاه بنویس؛ اگر clarify یا unsupported است دقیق بگو کاربر چه چیزی را اصلاح کند.',
+    '10) حذف، تغییرات گروهی، مدیریت کاربر/تیم/پروژه، یا کار نامطمئن را unsupported کن.',
+    '11) response را فارسی و کوتاه بنویس؛ اگر clarify یا unsupported است دقیق بگو کاربر چه چیزی را اصلاح کند.',
     '',
     'فرمت خروجی:',
     JSON.stringify({
-      action: 'create_task | update_task | comment_task | clarify | unsupported',
+      action: 'create_task | update_task | clarify | unsupported',
       response: 'پیام کوتاه فارسی',
+      actions: [
+        {
+          operation: 'create_task | update_task',
+          task: {},
+          update: {}
+        }
+      ],
       task: {
         projectId: 'uuid یا null',
         projectHint: 'string یا null',
@@ -1092,11 +1099,6 @@ async function generateAssistantCommandPlan(params: {
         clearDueAt: false,
         labels: []
       },
-      comment: {
-        taskKeyOrId: 'TASK-1 یا uuid یا null',
-        taskHint: 'string یا null',
-        body: 'string یا null'
-      }
     }, null, 2),
     '',
     'context:',
@@ -1212,24 +1214,72 @@ async function executeAssistantPlan(
   }
 
   if (plan.action === 'unsupported') {
-    return assistantResponse('unsupported', plan.response || 'این کار فعلا در محدوده عملیات قابل اجرای AI نیست. می‌توانم تسک بسازم، تسک را ویرایش کنم یا روی تسک کامنت بگذارم.');
+    return assistantResponse('unsupported', plan.response || 'این کار فعلا در محدوده عملیات قابل اجرای AI نیست. می‌توانم تسک بسازم یا تسک را ویرایش کنم.');
   }
 
-  try {
-    if (plan.action === 'create_task') {
-      return await executeCreateTaskPlan(actor, plan.task || null, context);
-    }
-    if (plan.action === 'update_task') {
-      return await executeUpdateTaskPlan(actor, plan.update || null, context);
-    }
-    if (plan.action === 'comment_task') {
-      return await executeCommentTaskPlan(actor, plan.comment || null, context);
-    }
-  } catch (error) {
-    return assistantResponse('blocked', assistantErrorMessage(error));
+  const fallbackActions: AssistantActionStep[] =
+    plan.action === 'create_task'
+      ? [{ operation: 'create_task', task: plan.task || null }]
+      : plan.action === 'update_task'
+        ? [{ operation: 'update_task', update: plan.update || null }]
+          : [];
+  const actions = plan.actions.length > 0 ? plan.actions : fallbackActions;
+
+  if (actions.length === 0) {
+    return assistantResponse('unsupported', 'این فرمان قابل اجرا نبود. پیام را دقیق‌تر و در محدوده ساخت یا ویرایش تسک بفرست.');
   }
 
-  return assistantResponse('unsupported', 'این فرمان قابل اجرا نبود. پیام را دقیق‌تر و در محدوده ساخت، ویرایش یا کامنت تسک بفرست.');
+  const stepResults: Array<{ index: number; operation: string; status: AssistantResultStatus; message: string; data: Record<string, unknown> }> = [];
+
+  for (const [index, action] of actions.entries()) {
+    try {
+      const result = await executeAssistantActionStep(actor, action, context);
+      stepResults.push({
+        index: index + 1,
+        operation: action.operation,
+        status: result.status as AssistantResultStatus,
+        message: result.message as string,
+        data: pickAssistantResultData(result)
+      });
+    } catch (error) {
+      stepResults.push({
+        index: index + 1,
+        operation: action.operation,
+        status: 'blocked',
+        message: assistantErrorMessage(error),
+        data: {}
+      });
+    }
+  }
+
+  const completed = stepResults.filter((item) => item.status === 'completed');
+  const failed = stepResults.filter((item) => item.status !== 'completed');
+
+  if (failed.length === 0) {
+    return assistantResponse(
+      'completed',
+      completed.length === 1 ? completed[0]?.message || 'عملیات انجام شد.' : `${completed.length} عملیات روی تسک‌ها انجام شد.`,
+      {
+        steps: stepResults,
+        task: firstTaskPayload(stepResults)
+      }
+    );
+  }
+
+  if (completed.length === 0) {
+    return assistantResponse('blocked', failed[0]?.message || 'نتونستم عملیات خواسته‌شده را انجام بدهم.', {
+      steps: stepResults
+    });
+  }
+
+  return assistantResponse(
+    'blocked',
+    `${completed.length} عملیات انجام شد، اما ${failed.length} مورد نیاز به اصلاح پیام یا دسترسی دارد.`,
+    {
+      steps: stepResults,
+      task: firstTaskPayload(stepResults)
+    }
+  );
 }
 
 async function executeCreateTaskPlan(
@@ -1329,30 +1379,37 @@ async function executeUpdateTaskPlan(
   });
 }
 
-async function executeCommentTaskPlan(
+async function executeAssistantActionStep(
   actor: Awaited<ReturnType<typeof getRequestActor>>,
-  comment: AssistantTaskComment | null,
+  step: AssistantActionStep,
   context: AssistantContext
 ) {
-  const taskKeyOrId = resolveAssistantTaskKey(comment?.taskKeyOrId || undefined, comment?.taskHint || undefined, context);
-  if (!comment?.body) {
-    return assistantResponse('needs_clarification', 'متن کامنت مشخص نیست. متن کامنت را هم در پیام بفرست.');
+  if (step.operation === 'create_task') {
+    return executeCreateTaskPlan(actor, step.task || null, context);
   }
-  if (!taskKeyOrId) {
-    return assistantResponse('needs_clarification', 'تسکی که باید کامنت بگیرد مشخص نیست. کلید تسک یا شماره تسک اخیر را در پیام بفرست.');
+  if (step.operation === 'update_task') {
+    return executeUpdateTaskPlan(actor, step.update || null, context);
   }
+  return assistantResponse('unsupported', 'این نوع عملیات فعلا پشتیبانی نمی‌شود.');
+}
 
-  const existing = await findTaskByIdOrKey(actor.workspace.id, taskKeyOrId, context.accessibleTeamIds);
-  if (!existing) {
-    return assistantResponse('blocked', 'این تسک را پیدا نکردم یا به آن دسترسی نداری.');
-  }
+function pickAssistantResultData(result: Record<string, unknown>): Record<string, unknown> {
+  const picked: Record<string, unknown> = {};
+  if ('task' in result) picked.task = result.task;
+  if ('comment' in result) picked.comment = result.comment;
+  if ('action' in result) picked.action = result.action;
+  return picked;
+}
 
-  const createdComment = await addTaskComment(actor, existing.id, comment.body, 'AGENT');
-  return assistantResponse('completed', `کامنت روی تسک ${existing.key} ثبت شد.`, {
-    action: 'comment_task',
-    task: { id: existing.id, key: existing.key },
-    comment: serializeTaskForResponse(createdComment)
-  });
+function firstTaskPayload(
+  items: Array<{ data: Record<string, unknown> }>
+): Record<string, unknown> | null {
+  for (const item of items) {
+    if (item.data.task && typeof item.data.task === 'object') {
+      return item.data.task as Record<string, unknown>;
+    }
+  }
+  return null;
 }
 
 function assistantResponse(status: AssistantResultStatus, message: string, extra: Record<string, unknown> = {}) {
