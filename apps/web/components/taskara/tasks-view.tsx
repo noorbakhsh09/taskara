@@ -1212,12 +1212,15 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
    }
 
    function applyComposerAiSuggestion(
-      next: Pick<TaskTextSuggestionResult, 'titleSuggestion' | 'descriptionSuggestion'>
+      next: Partial<Pick<TaskTextSuggestionResult, 'titleSuggestion' | 'descriptionSuggestion'>>
    ) {
       setForm((current) => ({
          ...current,
-         title: next.titleSuggestion ?? current.title,
-         description: next.descriptionSuggestion ?? current.description,
+         title: 'titleSuggestion' in next ? (next.titleSuggestion ?? current.title) : current.title,
+         description:
+            'descriptionSuggestion' in next
+               ? (next.descriptionSuggestion ?? current.description)
+               : current.description,
       }));
    }
 
@@ -1943,21 +1946,48 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                                     })
                                  }
                               >
-                                 اعمال نسخه بهبودیافته
+                                 اعمال همه پیشنهادها
                               </button>
+                              {composerAiSuggestion.titleSuggestion ? (
+                                 <button
+                                    className="inline-flex h-7 items-center rounded-full border border-white/12 bg-white/6 px-3 text-xs text-zinc-100 transition hover:bg-white/10"
+                                    type="button"
+                                    onClick={() =>
+                                       applyComposerAiSuggestion({
+                                          titleSuggestion:
+                                             composerAiSuggestion.titleSuggestion,
+                                       })
+                                    }
+                                 >
+                                    فقط عنوان
+                                 </button>
+                              ) : null}
+                              {composerAiSuggestion.descriptionSuggestion ? (
+                                 <button
+                                    className="inline-flex h-7 items-center rounded-full border border-white/12 bg-white/6 px-3 text-xs text-zinc-100 transition hover:bg-white/10"
+                                    type="button"
+                                    onClick={() =>
+                                       applyComposerAiSuggestion({
+                                          descriptionSuggestion:
+                                             composerAiSuggestion.descriptionSuggestion,
+                                       })
+                                    }
+                                 >
+                                    فقط متن
+                                 </button>
+                              ) : null}
                               {composerAiSuggestion.summarySuggestion ? (
                                  <button
                                     className="inline-flex h-7 items-center rounded-full border border-white/12 bg-white/6 px-3 text-xs text-zinc-100 transition hover:bg-white/10"
                                     type="button"
                                     onClick={() =>
                                        applyComposerAiSuggestion({
-                                          titleSuggestion: null,
                                           descriptionSuggestion:
                                              composerAiSuggestion.summarySuggestion,
                                        })
                                     }
                                  >
-                                    جایگزینی با خلاصه
+                                    فقط خلاصه
                                  </button>
                               ) : null}
                            </div>

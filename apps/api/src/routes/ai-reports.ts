@@ -4,8 +4,10 @@ import { prisma, type IntegrationAccount, type Prisma } from '@taskara/db';
 import { priorityLabel, statusLabel } from '@taskara/shared';
 import { z } from 'zod';
 import { config } from '../config';
-import { getRequestActor, requireWorkspaceAdmin } from '../services/actor';
+import { getRequestActor, isWorkspaceAdminRole, requireWorkspaceAdmin } from '../services/actor';
+import { createAnnouncement } from '../services/announcements';
 import { HttpError } from '../services/http';
+import { canAccessMeeting, createMeeting } from '../services/meetings';
 import { listAccessibleTeamIds } from '../services/team-access';
 import {
   addTaskProgressStartedAt,
@@ -90,8 +92,30 @@ const taskTextRefineOutputSchema = z.object({
 
 const TASK_STATUS_VALUES = ['BACKLOG', 'TODO', 'IN_PROGRESS', 'IN_REVIEW', 'BLOCKED', 'DONE', 'CANCELED'] as const;
 const TASK_PRIORITY_VALUES = ['NO_PRIORITY', 'LOW', 'MEDIUM', 'HIGH', 'URGENT'] as const;
-const assistantActionValues = ['create_task', 'update_task', 'query_tasks', 'bulk_update_tasks', 'clarify', 'unsupported'] as const;
-const assistantOperationValues = ['create_task', 'update_task', 'query_tasks', 'bulk_update_tasks'] as const;
+const MEETING_STATUS_VALUES = ['PLANNED', 'HELD', 'CANCELED', 'ARCHIVED'] as const;
+const ANNOUNCEMENT_STATUS_VALUES = ['DRAFT', 'PUBLISHED', 'ARCHIVED'] as const;
+const assistantActionValues = [
+  'create_task',
+  'update_task',
+  'query_tasks',
+  'bulk_update_tasks',
+  'create_meeting',
+  'query_meetings',
+  'create_announcement',
+  'query_announcements',
+  'clarify',
+  'unsupported'
+] as const;
+const assistantOperationValues = [
+  'create_task',
+  'update_task',
+  'query_tasks',
+  'bulk_update_tasks',
+  'create_meeting',
+  'query_meetings',
+  'create_announcement',
+  'query_announcements'
+] as const;
 const assistantQueryModeValues = [
   'latest_task_for_user',
   'latest_done_task_for_user',
@@ -186,12 +210,60 @@ const assistantBulkUpdateSchema = z.object({
   removeLabels: z.array(z.string().trim().min(1).max(40)).max(12).optional().default([])
 });
 
+const assistantMeetingDraftSchema = z.object({
+  title: z.string().trim().min(1).max(300).nullable().optional(),
+  description: z.string().trim().max(30000).nullable().optional(),
+  teamId: z.string().uuid().nullable().optional(),
+  teamHint: z.string().trim().min(1).max(160).nullable().optional(),
+  projectId: z.string().uuid().nullable().optional(),
+  projectHint: z.string().trim().min(1).max(160).nullable().optional(),
+  ownerId: z.string().uuid().nullable().optional(),
+  ownerHint: z.string().trim().min(1).max(160).nullable().optional(),
+  participantIds: z.array(z.string().uuid()).max(100).optional().default([]),
+  participantHints: z.array(z.string().trim().min(1).max(160)).max(100).optional().default([]),
+  status: z.enum(MEETING_STATUS_VALUES).nullable().optional(),
+  scheduledAt: z.string().datetime({ offset: true }).nullable().optional(),
+  heldAt: z.string().datetime({ offset: true }).nullable().optional()
+});
+
+const assistantMeetingQuerySchema = z.object({
+  mode: z.enum(['latest_for_me', 'upcoming', 'search_meetings']).optional().default('latest_for_me'),
+  teamId: z.string().uuid().nullable().optional(),
+  teamHint: z.string().trim().min(1).max(160).nullable().optional(),
+  projectId: z.string().uuid().nullable().optional(),
+  projectHint: z.string().trim().min(1).max(160).nullable().optional(),
+  statuses: z.array(z.enum(MEETING_STATUS_VALUES)).max(MEETING_STATUS_VALUES.length).optional().default([]),
+  keywords: z.array(z.string().trim().min(1).max(80)).max(6).optional().default([]),
+  mine: z.boolean().optional().default(true),
+  limit: z.number().int().min(1).max(20).optional().default(5)
+});
+
+const assistantAnnouncementDraftSchema = z.object({
+  title: z.string().trim().min(1).max(300).nullable().optional(),
+  body: z.string().trim().max(15000).nullable().optional(),
+  publish: z.boolean().optional().default(false),
+  recipientIds: z.array(z.string().uuid()).max(300).optional().default([]),
+  recipientHints: z.array(z.string().trim().min(1).max(160)).max(300).optional().default([])
+});
+
+const assistantAnnouncementQuerySchema = z.object({
+  mode: z.enum(['latest_for_me', 'latest_published', 'search_announcements']).optional().default('latest_for_me'),
+  statuses: z.array(z.enum(ANNOUNCEMENT_STATUS_VALUES)).max(ANNOUNCEMENT_STATUS_VALUES.length).optional().default([]),
+  unread: z.boolean().optional().default(false),
+  keywords: z.array(z.string().trim().min(1).max(80)).max(6).optional().default([]),
+  limit: z.number().int().min(1).max(20).optional().default(5)
+});
+
 const assistantActionStepSchema = z.object({
   operation: z.enum(assistantOperationValues),
   task: assistantTaskDraftSchema.nullable().optional(),
   update: assistantTaskUpdateSchema.nullable().optional(),
   query: assistantTaskQuerySchema.nullable().optional(),
-  bulk: assistantBulkUpdateSchema.nullable().optional()
+  bulk: assistantBulkUpdateSchema.nullable().optional(),
+  meeting: assistantMeetingDraftSchema.nullable().optional(),
+  meetingsQuery: assistantMeetingQuerySchema.nullable().optional(),
+  announcement: assistantAnnouncementDraftSchema.nullable().optional(),
+  announcementsQuery: assistantAnnouncementQuerySchema.nullable().optional()
 });
 
 const assistantCommandPlanSchema = z.object({
@@ -201,7 +273,11 @@ const assistantCommandPlanSchema = z.object({
   task: assistantTaskDraftSchema.nullable().optional(),
   update: assistantTaskUpdateSchema.nullable().optional(),
   query: assistantTaskQuerySchema.nullable().optional(),
-  bulk: assistantBulkUpdateSchema.nullable().optional()
+  bulk: assistantBulkUpdateSchema.nullable().optional(),
+  meeting: assistantMeetingDraftSchema.nullable().optional(),
+  meetingsQuery: assistantMeetingQuerySchema.nullable().optional(),
+  announcement: assistantAnnouncementDraftSchema.nullable().optional(),
+  announcementsQuery: assistantAnnouncementQuerySchema.nullable().optional()
 });
 
 const reportQueryPlanSchema = z.object({
@@ -274,6 +350,10 @@ type AssistantTaskDraft = z.infer<typeof assistantTaskDraftSchema>;
 type AssistantTaskUpdate = z.infer<typeof assistantTaskUpdateSchema>;
 type AssistantTaskQuery = z.infer<typeof assistantTaskQuerySchema>;
 type AssistantBulkUpdate = z.infer<typeof assistantBulkUpdateSchema>;
+type AssistantMeetingDraft = z.infer<typeof assistantMeetingDraftSchema>;
+type AssistantMeetingQuery = z.infer<typeof assistantMeetingQuerySchema>;
+type AssistantAnnouncementDraft = z.infer<typeof assistantAnnouncementDraftSchema>;
+type AssistantAnnouncementQuery = z.infer<typeof assistantAnnouncementQuerySchema>;
 type AssistantResultStatus = 'completed' | 'blocked' | 'needs_clarification' | 'unsupported';
 
 interface AssistantProjectContext {
@@ -284,6 +364,13 @@ interface AssistantProjectContext {
   teamId: string | null;
   teamName: string | null;
   teamSlug: string | null;
+}
+
+interface AssistantTeamContext {
+  index: number;
+  id: string;
+  name: string;
+  slug: string;
 }
 
 interface AssistantUserContext {
@@ -303,6 +390,7 @@ interface AssistantTaskContext {
 }
 
 interface AssistantContext {
+  teams: AssistantTeamContext[];
   projects: AssistantProjectContext[];
   users: AssistantUserContext[];
   recentTasks: AssistantTaskContext[];
@@ -1217,6 +1305,12 @@ async function generateAssistantCommandPlan(params: {
       email: user.email,
       teamIds: user.teamIds
     })),
+    teams: params.context.teams.map((team) => ({
+      index: team.index,
+      id: team.id,
+      name: team.name,
+      slug: team.slug
+    })),
     recentTasks: params.context.recentTasks
   };
 
@@ -1229,6 +1323,10 @@ async function generateAssistantCommandPlan(params: {
     '- update_task: ویرایش یک تسک موجود',
     '- query_tasks: گزارش‌گیری از تسک‌ها (فقط خواندن)',
     '- bulk_update_tasks: ویرایش چند تسک براساس فیلتر',
+    '- create_meeting: ایجاد جلسه',
+    '- query_meetings: گزارش‌گیری جلسه‌ها',
+    '- create_announcement: ایجاد اطلاعیه',
+    '- query_announcements: گزارش‌گیری اطلاعیه‌ها',
     '- clarify: وقتی اطلاعات ضروری کم است',
     '- unsupported: وقتی درخواست خارج از این عملیات‌هاست یا خطرناک/گروهی/نامطمئن است',
     '',
@@ -1246,20 +1344,25 @@ async function generateAssistantCommandPlan(params: {
     TASK_STATUS_VALUES.join(', '),
     '10) درخواست‌هایی مثل "آخرین تسک فلانی" یا "آخرین تسک انجام‌شده هر شخص" را با query_tasks پوشش بده.',
     '11) برای عملیات چندتایی، فقط از bulk_update_tasks استفاده کن.',
-    '12) حذف، مدیریت کاربر/تیم/پروژه، یا کار نامطمئن را unsupported کن.',
-    '13) response را فارسی و کوتاه بنویس؛ اگر clarify یا unsupported است دقیق بگو کاربر چه چیزی را اصلاح کند.',
+    '12) در create_announcement اگر publish=true است recipient لازم است؛ اگر نبود clarify بده.',
+    '13) حذف، مدیریت کاربر/تیم/پروژه، یا کار نامطمئن را unsupported کن.',
+    '14) response را فارسی و کوتاه بنویس؛ اگر clarify یا unsupported است دقیق بگو کاربر چه چیزی را اصلاح کند.',
     '',
     'فرمت خروجی:',
     JSON.stringify({
-      action: 'create_task | update_task | query_tasks | bulk_update_tasks | clarify | unsupported',
+      action: 'create_task | update_task | query_tasks | bulk_update_tasks | create_meeting | query_meetings | create_announcement | query_announcements | clarify | unsupported',
       response: 'پیام کوتاه فارسی',
       actions: [
         {
-          operation: 'create_task | update_task | query_tasks | bulk_update_tasks',
+          operation: 'create_task | update_task | query_tasks | bulk_update_tasks | create_meeting | query_meetings | create_announcement | query_announcements',
           task: {},
           update: {},
           query: {},
-          bulk: {}
+          bulk: {},
+          meeting: {},
+          meetingsQuery: {},
+          announcement: {},
+          announcementsQuery: {}
         }
       ],
       task: {
@@ -1318,6 +1421,46 @@ async function generateAssistantCommandPlan(params: {
         setDueAt: 'ISO یا null',
         addLabels: [],
         removeLabels: []
+      },
+      meeting: {
+        title: 'string',
+        description: 'string یا null',
+        teamId: 'uuid یا null',
+        teamHint: 'string یا null',
+        projectId: 'uuid یا null',
+        projectHint: 'string یا null',
+        ownerId: 'uuid یا null',
+        ownerHint: 'string یا null',
+        participantIds: [],
+        participantHints: [],
+        status: 'PLANNED یا null',
+        scheduledAt: 'ISO یا null',
+        heldAt: 'ISO یا null'
+      },
+      meetingsQuery: {
+        mode: 'latest_for_me | upcoming | search_meetings',
+        teamId: 'uuid یا null',
+        teamHint: 'string یا null',
+        projectId: 'uuid یا null',
+        projectHint: 'string یا null',
+        statuses: [],
+        keywords: [],
+        mine: true,
+        limit: 5
+      },
+      announcement: {
+        title: 'string',
+        body: 'string یا null',
+        publish: false,
+        recipientIds: [],
+        recipientHints: []
+      },
+      announcementsQuery: {
+        mode: 'latest_for_me | latest_published | search_announcements',
+        statuses: [],
+        unread: false,
+        keywords: [],
+        limit: 5
       }
     }, null, 2),
     '',
@@ -1391,7 +1534,15 @@ async function loadAssistantContext(actor: Awaited<ReturnType<typeof getRequestA
     ...(accessibleTeamIds ? { project: { OR: [{ teamId: null }, { teamId: { in: accessibleTeamIds } }] } } : {})
   };
 
-  const [projects, members, teamMembers, recentTasks] = await Promise.all([
+  const [teams, projects, members, teamMembers, recentTasks] = await Promise.all([
+    prisma.team.findMany({
+      where: {
+        workspaceId: actor.workspace.id,
+        ...(accessibleTeamIds ? { id: { in: accessibleTeamIds } } : {})
+      },
+      orderBy: [{ name: 'asc' }],
+      select: { id: true, name: true, slug: true }
+    }),
     prisma.project.findMany({
       where: projectWhere,
       orderBy: [{ updatedAt: 'desc' }],
@@ -1424,6 +1575,12 @@ async function loadAssistantContext(actor: Awaited<ReturnType<typeof getRequestA
   }
 
   return {
+    teams: teams.map((team, index) => ({
+      index: index + 1,
+      id: team.id,
+      name: team.name,
+      slug: team.slug
+    })),
     projects: projects.map((project, index) => ({
       index: index + 1,
       id: project.id,
@@ -1461,7 +1618,7 @@ async function executeAssistantPlan(
   }
 
   if (plan.action === 'unsupported') {
-    return assistantResponse('unsupported', plan.response || 'این کار فعلا در محدوده عملیات قابل اجرای AI نیست. می‌توانم تسک بسازم، تسک را ویرایش کنم، گزارش تسک بدهم یا روی چند تسک ویرایش گروهی انجام بدهم.');
+    return assistantResponse('unsupported', plan.response || 'این کار فعلا در محدوده عملیات قابل اجرای AI نیست. می‌توانم تسک/جلسه/اطلاعیه را مدیریت کنم و گزارش بگیرم.');
   }
 
   const fallbackActions: AssistantActionStep[] =
@@ -1473,11 +1630,19 @@ async function executeAssistantPlan(
           ? [{ operation: 'query_tasks', query: plan.query || null }]
           : plan.action === 'bulk_update_tasks'
             ? [{ operation: 'bulk_update_tasks', bulk: plan.bulk || null }]
+            : plan.action === 'create_meeting'
+              ? [{ operation: 'create_meeting', meeting: plan.meeting || null }]
+              : plan.action === 'query_meetings'
+                ? [{ operation: 'query_meetings', meetingsQuery: plan.meetingsQuery || null }]
+                : plan.action === 'create_announcement'
+                  ? [{ operation: 'create_announcement', announcement: plan.announcement || null }]
+                  : plan.action === 'query_announcements'
+                    ? [{ operation: 'query_announcements', announcementsQuery: plan.announcementsQuery || null }]
           : [];
   const actions = plan.actions.length > 0 ? plan.actions : fallbackActions;
 
   if (actions.length === 0) {
-    return assistantResponse('unsupported', 'این فرمان قابل اجرا نبود. پیام را دقیق‌تر و در محدوده ساخت، ویرایش، گزارش یا ویرایش گروهی تسک بفرست.');
+    return assistantResponse('unsupported', 'این فرمان قابل اجرا نبود. پیام را دقیق‌تر بفرست تا روی تسک/جلسه/اطلاعیه اجرا کنم.');
   }
 
   const stepResults: Array<{ index: number; operation: string; status: AssistantResultStatus; message: string; data: Record<string, unknown> }> = [];
@@ -1918,6 +2083,227 @@ async function executeBulkUpdateTasksPlan(
   });
 }
 
+async function executeCreateMeetingPlan(
+  actor: Awaited<ReturnType<typeof getRequestActor>>,
+  meeting: AssistantMeetingDraft | null,
+  context: AssistantContext
+) {
+  const input = assistantMeetingDraftSchema.parse(meeting || {});
+  if (!input.title) {
+    return assistantResponse('needs_clarification', 'برای ایجاد جلسه، عنوان جلسه لازم است.');
+  }
+
+  const team = resolveAssistantTeam(input.teamId || undefined, input.teamHint || undefined, context);
+  const project = resolveAssistantProject(input.projectId || undefined, input.projectHint || undefined, context);
+  const owner = resolveOptionalAssistantUser(input.ownerId, input.ownerHint, context);
+  const participantIds = [
+    ...new Set([
+      ...input.participantIds,
+      ...input.participantHints
+        .map((hint) => resolveOptionalAssistantUser(null, hint, context)?.id)
+        .filter((value): value is string => Boolean(value))
+    ])
+  ];
+
+  const created = await createMeeting(actor, {
+    title: input.title,
+    description: input.description || undefined,
+    teamId: team?.id,
+    projectId: project?.id,
+    ownerId: owner?.id,
+    participantIds,
+    status: input.status || 'PLANNED',
+    scheduledAt: input.scheduledAt || undefined,
+    heldAt: input.heldAt || undefined
+  });
+
+  return assistantResponse('completed', `جلسه "${created.title}" ایجاد شد.`, {
+    action: 'create_meeting',
+    meeting: {
+      id: created.id,
+      title: created.title,
+      status: meetingStatusFa(created.status),
+      scheduledAt: created.scheduledAt?.toISOString() || null,
+      team: created.team?.name || null,
+      project: created.project?.name || null
+    }
+  });
+}
+
+async function executeQueryMeetingsPlan(
+  actor: Awaited<ReturnType<typeof getRequestActor>>,
+  query: AssistantMeetingQuery | null,
+  context: AssistantContext
+) {
+  const input = assistantMeetingQuerySchema.parse(query || {});
+  const team = resolveAssistantTeam(input.teamId || undefined, input.teamHint || undefined, context);
+  const project = resolveAssistantProject(input.projectId || undefined, input.projectHint || undefined, context);
+  const where: Prisma.MeetingWhereInput = {
+    workspaceId: actor.workspace.id,
+    ...(team ? { teamId: team.id } : {}),
+    ...(project ? { projectId: project.id } : {}),
+    ...(input.statuses.length ? { status: { in: input.statuses } } : {})
+  };
+
+  if (!isWorkspaceAdminRole(actor.role) || input.mine) {
+    where.OR = [
+      { ownerId: actor.user.id },
+      { createdById: actor.user.id },
+      { participants: { some: { userId: actor.user.id } } }
+    ];
+  }
+
+  if (input.keywords.length) {
+    where.AND = [
+      {
+        OR: input.keywords.flatMap((keyword) => ([
+          { title: { contains: keyword, mode: 'insensitive' as const } },
+          { description: { contains: keyword, mode: 'insensitive' as const } }
+        ]))
+      }
+    ];
+  }
+
+  if (input.mode === 'upcoming') {
+    where.scheduledAt = { gte: new Date() };
+  }
+
+  const meetings = await prisma.meeting.findMany({
+    where,
+    orderBy: input.mode === 'upcoming' ? [{ scheduledAt: 'asc' }] : [{ scheduledAt: 'desc' }, { createdAt: 'desc' }],
+    take: input.limit,
+    include: {
+      team: { select: { name: true } },
+      project: { select: { name: true } },
+      owner: { select: { name: true } },
+      participants: { select: { userId: true } }
+    }
+  });
+
+  const visible = meetings.filter((item) => canAccessMeeting(actor, item));
+  const lines = visible.length
+    ? visible.map((item) => [
+        `- ${item.title}`,
+        `  وضعیت: ${meetingStatusFa(item.status)} | تیم: ${item.team?.name || '-'} | پروژه: ${item.project?.name || '-'}`,
+        `  زمان: ${formatFaDateTime(item.scheduledAt?.toISOString() || null)} | مالک: ${item.owner?.name || '-'}`
+      ].join('\n'))
+    : ['- موردی پیدا نشد.'];
+
+  return assistantResponse('completed', `نتیجه جلسه‌ها:\n${lines.join('\n')}`, {
+    action: 'query_meetings',
+    meetings: visible.map((item) => ({
+      id: item.id,
+      title: item.title,
+      status: meetingStatusFa(item.status),
+      scheduledAt: item.scheduledAt?.toISOString() || null,
+      team: item.team?.name || null,
+      project: item.project?.name || null
+    }))
+  });
+}
+
+async function executeCreateAnnouncementPlan(
+  actor: Awaited<ReturnType<typeof getRequestActor>>,
+  announcement: AssistantAnnouncementDraft | null,
+  context: AssistantContext
+) {
+  if (!isWorkspaceAdminRole(actor.role)) {
+    return assistantResponse('blocked', 'برای ایجاد اطلاعیه باید دسترسی مدیر یا مالک داشته باشی.');
+  }
+
+  const input = assistantAnnouncementDraftSchema.parse(announcement || {});
+  if (!input.title) {
+    return assistantResponse('needs_clarification', 'برای ایجاد اطلاعیه، عنوان لازم است.');
+  }
+
+  const resolvedRecipientIds = [
+    ...new Set([
+      ...input.recipientIds,
+      ...input.recipientHints
+        .map((hint) => resolveOptionalAssistantUser(null, hint, context)?.id)
+        .filter((value): value is string => Boolean(value))
+    ])
+  ];
+
+  if (input.publish && resolvedRecipientIds.length === 0) {
+    return assistantResponse('needs_clarification', 'برای انتشار اطلاعیه، حداقل یک گیرنده لازم است.');
+  }
+
+  const created = await createAnnouncement(actor, {
+    title: input.title,
+    body: input.body || undefined,
+    recipientIds: resolvedRecipientIds,
+    publish: input.publish
+  });
+
+  return assistantResponse('completed', `اطلاعیه "${created.title}" ${created.status === 'PUBLISHED' ? 'منتشر' : 'ثبت'} شد.`, {
+    action: 'create_announcement',
+    announcement: {
+      id: created.id,
+      title: created.title,
+      status: announcementStatusFa(created.status),
+      recipientCount: created._count?.recipients || 0
+    }
+  });
+}
+
+async function executeQueryAnnouncementsPlan(
+  actor: Awaited<ReturnType<typeof getRequestActor>>,
+  query: AssistantAnnouncementQuery | null
+) {
+  const input = assistantAnnouncementQuerySchema.parse(query || {});
+  const isAdmin = isWorkspaceAdminRole(actor.role);
+  const where: Prisma.AnnouncementWhereInput = {
+    workspaceId: actor.workspace.id,
+    status: input.statuses.length ? { in: input.statuses } : (isAdmin ? undefined : 'PUBLISHED')
+  };
+
+  if (!isAdmin) {
+    where.recipients = { some: { userId: actor.user.id } };
+  }
+
+  if (input.unread) {
+    where.recipients = { some: { userId: actor.user.id, readAt: null } };
+    where.status = 'PUBLISHED';
+  }
+
+  if (input.keywords.length) {
+    where.OR = input.keywords.flatMap((keyword) => ([
+      { title: { contains: keyword, mode: 'insensitive' as const } },
+      { body: { contains: keyword, mode: 'insensitive' as const } }
+    ]));
+  }
+
+  const items = await prisma.announcement.findMany({
+    where,
+    orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
+    take: input.limit,
+    include: {
+      creator: { select: { name: true } },
+      _count: { select: { recipients: true } }
+    }
+  });
+
+  const lines = items.length
+    ? items.map((item) => [
+        `- ${item.title}`,
+        `  وضعیت: ${announcementStatusFa(item.status)} | گیرنده‌ها: ${item._count.recipients.toLocaleString('fa-IR')} | ایجادکننده: ${item.creator?.name || '-'}`,
+        `  زمان انتشار: ${formatFaDateTime(item.publishedAt?.toISOString() || null)}`
+      ].join('\n'))
+    : ['- موردی پیدا نشد.'];
+
+  return assistantResponse('completed', `نتیجه اطلاعیه‌ها:\n${lines.join('\n')}`, {
+    action: 'query_announcements',
+    announcements: items.map((item) => ({
+      id: item.id,
+      title: item.title,
+      status: announcementStatusFa(item.status),
+      publishedAt: item.publishedAt?.toISOString() || null,
+      recipientCount: item._count.recipients
+    }))
+  });
+}
+
 async function executeAssistantActionStep(
   actor: Awaited<ReturnType<typeof getRequestActor>>,
   step: AssistantActionStep,
@@ -1935,6 +2321,18 @@ async function executeAssistantActionStep(
   if (step.operation === 'bulk_update_tasks') {
     return executeBulkUpdateTasksPlan(actor, step.bulk || null, context);
   }
+  if (step.operation === 'create_meeting') {
+    return executeCreateMeetingPlan(actor, step.meeting || null, context);
+  }
+  if (step.operation === 'query_meetings') {
+    return executeQueryMeetingsPlan(actor, step.meetingsQuery || null, context);
+  }
+  if (step.operation === 'create_announcement') {
+    return executeCreateAnnouncementPlan(actor, step.announcement || null, context);
+  }
+  if (step.operation === 'query_announcements') {
+    return executeQueryAnnouncementsPlan(actor, step.announcementsQuery || null);
+  }
   return assistantResponse('unsupported', 'این نوع عملیات فعلا پشتیبانی نمی‌شود.');
 }
 
@@ -1943,6 +2341,10 @@ function pickAssistantResultData(result: Record<string, unknown>): Record<string
   if ('task' in result) picked.task = result.task;
   if ('query' in result) picked.query = result.query;
   if ('bulk' in result) picked.bulk = result.bulk;
+  if ('meeting' in result) picked.meeting = result.meeting;
+  if ('meetings' in result) picked.meetings = result.meetings;
+  if ('announcement' in result) picked.announcement = result.announcement;
+  if ('announcements' in result) picked.announcements = result.announcements;
   if ('action' in result) picked.action = result.action;
   return picked;
 }
@@ -1985,6 +2387,28 @@ function resolveAssistantProject(
 
   return context.projects.find((project) => {
     const fields = [project.name, project.keyPrefix, project.teamName || '', project.teamSlug || ''].map(normalizeSearchText);
+    return fields.some((field) => field === normalized || field.includes(normalized) || normalized.includes(field));
+  }) || null;
+}
+
+function resolveAssistantTeam(
+  teamId: string | undefined,
+  teamHint: string | undefined,
+  context: AssistantContext
+): AssistantTeamContext | null {
+  if (teamId) return context.teams.find((team) => team.id === teamId) || null;
+  if (context.teams.length === 1 && !teamHint) return context.teams[0];
+  if (!teamHint) return null;
+
+  const normalized = normalizeSearchText(teamHint);
+  const numericIndex = numericHint(normalized);
+  if (numericIndex) {
+    const byIndex = context.teams.find((team) => team.index === numericIndex);
+    if (byIndex) return byIndex;
+  }
+
+  return context.teams.find((team) => {
+    const fields = [team.name, team.slug].map(normalizeSearchText);
     return fields.some((field) => field === normalized || field.includes(normalized) || normalized.includes(field));
   }) || null;
 }
@@ -2097,6 +2521,23 @@ function formatTaskLineFa(input: {
     `  وضعیت: ${statusLabel(input.status)} | اولویت: ${priorityLabel(input.priority)} | پروژه: ${input.project}`,
     `  مسئول: ${input.assignee || 'ندارد'} | سررسید: ${formatFaDateTime(input.dueAt || null)} | انجام‌شده: ${formatFaDateTime(input.completedAt || null)}`
   ].join('\n');
+}
+
+function meetingStatusFa(status: (typeof MEETING_STATUS_VALUES)[number]): string {
+  return {
+    PLANNED: 'برنامه‌ریزی‌شده',
+    HELD: 'برگزارشده',
+    CANCELED: 'لغوشده',
+    ARCHIVED: 'بایگانی'
+  }[status];
+}
+
+function announcementStatusFa(status: (typeof ANNOUNCEMENT_STATUS_VALUES)[number]): string {
+  return {
+    DRAFT: 'پیش‌نویس',
+    PUBLISHED: 'منتشرشده',
+    ARCHIVED: 'بایگانی'
+  }[status];
 }
 
 export async function registerAiReportRoutes(app: FastifyInstance): Promise<void> {

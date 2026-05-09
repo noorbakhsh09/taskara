@@ -385,17 +385,27 @@ export function IssuePage() {
    }
 
    async function applyAiSuggestion(
-      next: Pick<TaskTextSuggestionResult, 'titleSuggestion' | 'descriptionSuggestion'>
+      next: Partial<Pick<TaskTextSuggestionResult, 'titleSuggestion' | 'descriptionSuggestion'>>
    ) {
       if (!task || aiApplying) return;
       const patch: TaskUpdatePatch = {};
-      const nextTitle = (next.titleSuggestion ?? titleDraft).trim();
-      const nextDescription = (next.descriptionSuggestion ?? descriptionDraft).trim();
-      const currentTitle = task.title.trim();
-      const currentDescription = task.description?.trim() || '';
+      let nextTitleDraft = titleDraft;
+      let nextDescriptionDraft = descriptionDraft;
 
-      if (nextTitle && nextTitle !== currentTitle) patch.title = nextTitle;
-      if (nextDescription !== currentDescription) patch.description = nextDescription || null;
+      if ('titleSuggestion' in next) {
+         const currentTitle = task.title.trim();
+         const nextTitle = (next.titleSuggestion ?? '').trim();
+         if (nextTitle && nextTitle !== currentTitle) patch.title = nextTitle;
+         nextTitleDraft = nextTitle || nextTitleDraft;
+      }
+
+      if ('descriptionSuggestion' in next) {
+         const currentDescription = task.description?.trim() || '';
+         const nextDescription = (next.descriptionSuggestion ?? '').trim();
+         if (nextDescription !== currentDescription) patch.description = nextDescription || null;
+         nextDescriptionDraft = nextDescription;
+      }
+
       if (!Object.keys(patch).length) {
          toast.message('تغییری برای اعمال وجود ندارد.');
          return;
@@ -403,12 +413,12 @@ export function IssuePage() {
 
       setAiApplying(true);
       try {
-         setTitleDraft(nextTitle);
-         setDescriptionDraft(nextDescription);
+         if ('titleSuggestion' in next) setTitleDraft(nextTitleDraft);
+         if ('descriptionSuggestion' in next) setDescriptionDraft(nextDescriptionDraft);
          const updated = await updateTask(patch);
          if (updated) {
-            setTitleDraft(updated.title);
-            setDescriptionDraft(updated.description || '');
+            if ('titleSuggestion' in next) setTitleDraft(updated.title);
+            if ('descriptionSuggestion' in next) setDescriptionDraft(updated.description || '');
             toast.success('پیشنهاد AI اعمال شد.');
          }
       } finally {
@@ -765,8 +775,36 @@ export function IssuePage() {
                               })
                            }
                         >
-                           اعمال نسخه بهبودیافته
+                           اعمال همه پیشنهادها
                         </button>
+                        {aiSuggestion.titleSuggestion ? (
+                           <button
+                              className="inline-flex h-7 items-center rounded-full border border-white/12 bg-white/6 px-3 text-xs text-zinc-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={aiApplying}
+                              type="button"
+                              onClick={() =>
+                                 void applyAiSuggestion({
+                                    titleSuggestion: aiSuggestion.titleSuggestion,
+                                 })
+                              }
+                           >
+                              فقط عنوان
+                           </button>
+                        ) : null}
+                        {aiSuggestion.descriptionSuggestion ? (
+                           <button
+                              className="inline-flex h-7 items-center rounded-full border border-white/12 bg-white/6 px-3 text-xs text-zinc-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={aiApplying}
+                              type="button"
+                              onClick={() =>
+                                 void applyAiSuggestion({
+                                    descriptionSuggestion: aiSuggestion.descriptionSuggestion,
+                                 })
+                              }
+                           >
+                              فقط متن
+                           </button>
+                        ) : null}
                         {aiSuggestion.summarySuggestion ? (
                            <button
                               className="inline-flex h-7 items-center rounded-full border border-white/12 bg-white/6 px-3 text-xs text-zinc-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
@@ -774,12 +812,11 @@ export function IssuePage() {
                               type="button"
                               onClick={() =>
                                  void applyAiSuggestion({
-                                    titleSuggestion: null,
                                     descriptionSuggestion: aiSuggestion.summarySuggestion,
                                  })
                               }
                            >
-                              جایگزینی با خلاصه
+                              فقط خلاصه
                            </button>
                         ) : null}
                      </div>
