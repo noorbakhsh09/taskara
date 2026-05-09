@@ -17,7 +17,6 @@ import {
    Loader2,
    MoreHorizontal,
    Paperclip,
-   Plus,
    Send,
    Sparkles,
    Tag,
@@ -26,6 +25,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Textarea } from '@/components/ui/textarea';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { DescriptionEditor } from '@/components/taskara/description-editor';
 import { TaskDueDateControl } from '@/components/taskara/task-due-date-control';
 import {
@@ -614,27 +614,48 @@ export function IssuePage() {
                <span className="ltr text-sm font-medium text-zinc-500">{task.key}</span>
             </div>
 
-            <div className="relative">
-               <input
-                  className="w-full border-0 bg-transparent p-0 text-2xl font-semibold leading-8 text-zinc-100 outline-none placeholder:text-zinc-600"
-                  dir="auto"
-                  value={titleDraft}
-                  onFocus={() => {
-                     titleFocusedRef.current = true;
-                  }}
-                  onBlur={() => {
-                     titleFocusedRef.current = false;
-                     void saveTitleDraft();
-                  }}
-                  onChange={(event) => setTitleDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                     if (event.key === 'Enter') event.currentTarget.blur();
-                  }}
-                  placeholder={fa.issue.titlePlaceholder}
-               />
-               {savingField === 'title' ? (
-                  <Loader2 className="absolute left-0 top-3 size-4 animate-spin text-zinc-500" />
-               ) : null}
+            <div className="flex items-start gap-3">
+               <div className="relative min-w-0 flex-1">
+                  <input
+                     className="w-full border-0 bg-transparent p-0 text-right text-2xl font-semibold leading-8 text-zinc-100 outline-none placeholder:text-zinc-600"
+                     dir="auto"
+                     value={titleDraft}
+                     onFocus={() => {
+                        titleFocusedRef.current = true;
+                     }}
+                     onBlur={() => {
+                        titleFocusedRef.current = false;
+                        void saveTitleDraft();
+                     }}
+                     onChange={(event) => setTitleDraft(event.target.value)}
+                     onKeyDown={(event) => {
+                        if (event.key === 'Enter') event.currentTarget.blur();
+                     }}
+                     placeholder={fa.issue.titlePlaceholder}
+                  />
+                  {savingField === 'title' ? (
+                     <Loader2 className="absolute left-0 top-3 size-4 animate-spin text-zinc-500" />
+                  ) : null}
+               </div>
+               <Tooltip>
+                  <TooltipTrigger asChild>
+                     <button
+                        className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-white/12 bg-transparent text-zinc-400 transition hover:bg-white/8 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={aiSuggestionLoading || aiApplying}
+                        type="button"
+                        onClick={() => void requestAiSuggestion()}
+                     >
+                        {aiSuggestionLoading ? (
+                           <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                           <Sparkles className="size-3.5" />
+                        )}
+                     </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="border-white/10 bg-[#202023] text-zinc-200" side="bottom">
+                     بهبود و خلاصه‌سازی متن با AI
+                  </TooltipContent>
+               </Tooltip>
             </div>
 
             <section className="mt-6">
@@ -690,21 +711,6 @@ export function IssuePage() {
                         <Paperclip className="size-4" />
                      )}
                      <span className="sr-only">{fa.issue.uploadAttachment}</span>
-                  </button>
-                  <button
-                     className="inline-flex h-8 items-center gap-1.5 rounded-full border border-cyan-300/35 bg-[linear-gradient(135deg,rgba(56,189,248,0.22),rgba(99,102,241,0.2))] px-3 text-xs font-medium text-cyan-50 shadow-[0_8px_24px_rgba(56,189,248,0.18),inset_0_1px_0_rgba(255,255,255,0.2)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                     disabled={aiSuggestionLoading || aiApplying}
-                     type="button"
-                     onClick={() => void requestAiSuggestion()}
-                  >
-                     {aiSuggestionLoading ? (
-                        <Loader2 className="size-3.5 animate-spin" />
-                     ) : (
-                        <span className="relative inline-flex size-4 items-center justify-center">
-                           <Sparkles className="size-3.5" />
-                        </span>
-                     )}
-                     <span>بازنویسی هوشمند</span>
                   </button>
                </div>
 

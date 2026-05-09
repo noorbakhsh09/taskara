@@ -57,6 +57,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Switch } from '@/components/ui/switch';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
    ContextMenu,
    ContextMenuContent,
@@ -1843,15 +1844,36 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                         composerFullscreen && 'min-h-0 overflow-auto'
                      )}
                   >
-                     <Input
-                        autoFocus
-                        className="h-auto border-none bg-transparent px-0 text-xl leading-7 font-semibold text-zinc-100 shadow-none outline-none placeholder:text-zinc-600 focus-visible:ring-0"
-                        value={form.title}
-                        onChange={(event) =>
-                           setForm((current) => ({ ...current, title: event.target.value }))
-                        }
-                        placeholder={fa.issue.titlePlaceholder}
-                     />
+                     <div className="flex items-start gap-3">
+                        <Input
+                           autoFocus
+                           className="h-auto flex-1 border-none bg-transparent px-0 text-right text-xl leading-7 font-semibold text-zinc-100 shadow-none outline-none placeholder:text-zinc-600 focus-visible:ring-0"
+                           value={form.title}
+                           onChange={(event) =>
+                              setForm((current) => ({ ...current, title: event.target.value }))
+                           }
+                           placeholder={fa.issue.titlePlaceholder}
+                        />
+                        <Tooltip>
+                           <TooltipTrigger asChild>
+                              <button
+                                 className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-white/12 bg-transparent text-zinc-400 transition hover:bg-white/8 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                 disabled={composerSubmitting || composerAiLoading}
+                                 type="button"
+                                 onClick={() => void suggestComposerTextWithAi()}
+                              >
+                                 {composerAiLoading ? (
+                                    <Loader2 className="size-3.5 animate-spin" />
+                                 ) : (
+                                    <Sparkles className="size-3.5" />
+                                 )}
+                              </button>
+                           </TooltipTrigger>
+                           <TooltipContent className="border-white/10 bg-[#202023] text-zinc-200" side="bottom">
+                              بهبود و خلاصه‌سازی متن با AI
+                           </TooltipContent>
+                        </Tooltip>
+                     </div>
                      <DescriptionEditor
                         className="mt-2"
                         contentClassName="min-h-20 text-right text-sm leading-6 text-zinc-300"
@@ -2086,21 +2108,6 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                         onClick={() => composerFileInputRef.current?.click()}
                      >
                         <Paperclip className="size-4" />
-                     </button>
-                     <button
-                        className="inline-flex h-8 items-center gap-1.5 rounded-full border border-cyan-300/35 bg-[linear-gradient(135deg,rgba(56,189,248,0.22),rgba(99,102,241,0.2))] px-3 text-xs font-medium text-cyan-50 shadow-[0_8px_24px_rgba(56,189,248,0.18),inset_0_1px_0_rgba(255,255,255,0.2)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                        disabled={composerSubmitting || composerAiLoading}
-                        type="button"
-                        onClick={() => void suggestComposerTextWithAi()}
-                     >
-                        {composerAiLoading ? (
-                           <Loader2 className="size-3.5 animate-spin" />
-                        ) : (
-                           <span className="relative inline-flex size-4 items-center justify-center">
-                              <Sparkles className="size-3.5" />{' '}
-                           </span>
-                        )}
-                        <span>بازنویسی هوشمند</span>
                      </button>
                      <div className="flex items-center gap-3">
                         <label
