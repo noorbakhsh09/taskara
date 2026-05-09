@@ -15,6 +15,9 @@ interface AssistantMessage {
    role: AssistantMessageRole;
    content: string;
    status?: AssistantMessageStatus;
+   audioUrl?: string;
+   audioMimeType?: string;
+   transcript?: string;
 }
 
 interface AssistantHistoryItem {
@@ -64,6 +67,8 @@ export function AiAssistantDock() {
    const recorderRef = React.useRef<MediaRecorder | null>(null);
    const chunksRef = React.useRef<BlobPart[]>([]);
    const messagesEndRef = React.useRef<HTMLDivElement | null>(null);
+   const audioObjectUrlsRef = React.useRef<string[]>([]);
+   const discardRecordingRef = React.useRef(false);
    const assistantModel = session?.user.aiModel?.trim() || workspaceAiModel || fallbackAiModel;
    const voiceSupported =
       typeof window !== 'undefined' &&
@@ -77,7 +82,15 @@ export function AiAssistantDock() {
 
    React.useEffect(() => {
       return () => {
+         discardRecordingRef.current = true;
          recorderRef.current?.stop();
+      };
+   }, []);
+
+   React.useEffect(() => {
+      return () => {
+         audioObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+         audioObjectUrlsRef.current = [];
       };
    }, []);
 
@@ -116,23 +129,37 @@ export function AiAssistantDock() {
       await sendAssistantRequest({ message: text, history });
    }
 
-   async function submitAudioMessage(audio: AssistantAudioPayload) {
+   async function submitAudioMessage(
+      input: {
+         audio: AssistantAudioPayload;
+         audioUrl: string;
+         audioMimeType: string;
+      }
+   ) {
       if (submitting) return;
       const userMessage: AssistantMessage = {
          id: crypto.randomUUID(),
          role: 'user',
-         content: 'پیام صوتی ارسال شد.',
+         content: 'پیام صوتی',
+         audioUrl: input.audioUrl,
+         audioMimeType: input.audioMimeType,
       };
       const history = buildHistory(messages);
 
       setMessages((current) => [...current, userMessage]);
-      await sendAssistantRequest({ message: '', history, audio });
+      await sendAssistantRequest({
+         message: '',
+         history,
+         audio: input.audio,
+         pendingAudioMessageId: userMessage.id,
+      });
    }
 
    async function sendAssistantRequest(input: {
       message: string;
       history: AssistantHistoryItem[];
       audio?: AssistantAudioPayload;
+      pendingAudioMessageId?: string;
    }) {
       setSubmitting(true);
       try {
@@ -151,15 +178,25 @@ export function AiAssistantDock() {
             ? `${response.message}\n\nمتن تشخیص‌داده‌شده:\n${response.transcribedText.trim()}`
             : response.message;
 
-         setMessages((current) => [
-            ...current,
-            {
-               id: crypto.randomUUID(),
-               role: 'assistant',
-               content: assistantMessage,
-               status: response.status,
-            },
-         ]);
+         setMessages((current) => {
+            const nextMessages = input.pendingAudioMessageId
+               ? current.map((message) => {
+                    if (message.id !== input.pendingAudioMessageId) return message;
+                    const transcript = response.transcribedText?.trim();
+                    if (!transcript) return message;
+                    return { ...message, transcript, content: transcript };
+                 })
+               : current;
+            return [
+               ...nextMessages,
+               {
+                  id: crypto.randomUUID(),
+                  role: 'assistant',
+                  content: assistantMessage,
+                  status: response.status,
+               },
+            ];
+         });
          if (response.ok) {
             toast.success(response.task?.key ? `${response.task.key} انجام شد.` : 'درخواست انجام شد.');
          }
@@ -182,6 +219,7 @@ export function AiAssistantDock() {
 
    async function toggleRecording() {
       if (recording) {
+         discardRecordingRef.current = false;
          recorderRef.current?.stop();
          return;
       }
@@ -209,6 +247,12 @@ export function AiAssistantDock() {
          recorder.onstop = () => {
             setRecording(false);
             stream.getTracks().forEach((track) => track.stop());
+            const shouldDiscard = discardRecordingRef.current;
+            discardRecordingRef.current = false;
+            if (shouldDiscard) {
+               chunksRef.current = [];
+               return;
+            }
 
             const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
             chunksRef.current = [];
@@ -217,23 +261,37 @@ export function AiAssistantDock() {
                return;
             }
             void audioBlobToBase64(blob)
-               .then((data) =>
-                  submitAudioMessage({
-                     data,
-                     mimeType: blob.type || recorder.mimeType || 'audio/webm',
-                     language: 'fa',
-                  })
-               )
+               .then((data) => {
+                  const audioUrl = URL.createObjectURL(blob);
+                  audioObjectUrlsRef.current.push(audioUrl);
+                  return submitAudioMessage({
+                     audio: {
+                        data,
+                        mimeType: blob.type || recorder.mimeType || 'audio/webm',
+                        language: 'fa',
+                     },
+                     audioUrl,
+                     audioMimeType: blob.type || recorder.mimeType || 'audio/webm',
+                  });
+               })
                .catch(() => toast.error('پردازش پیام صوتی ناموفق بود.'));
          };
 
          recorderRef.current = recorder;
+         discardRecordingRef.current = false;
          recorder.start();
          setRecording(true);
       } catch {
          setRecording(false);
          toast.error('دسترسی میکروفون مجاز نیست یا ضبط شروع نشد.');
       }
+   }
+
+   function cancelRecording() {
+      if (!recording) return;
+      discardRecordingRef.current = true;
+      recorderRef.current?.stop();
+      toast.message('ضبط صوت لغو شد.');
    }
 
    return (
@@ -291,21 +349,34 @@ export function AiAssistantDock() {
                      }}
                   />
                   <div className="mt-2 flex items-center justify-between gap-2">
-                     <Button
-                        aria-label={recording ? 'توقف ضبط صدا و ارسال' : 'شروع ضبط پیام صوتی'}
-                        className={cn(
-                           'size-8 rounded-full border border-white/10 bg-transparent text-zinc-400 hover:bg-white/8 hover:text-zinc-100',
-                           recording && 'border-rose-400/30 bg-rose-500/10 text-rose-200'
-                        )}
-                        disabled={submitting || !voiceSupported}
-                        size="icon"
-                        title={voiceSupported ? (recording ? 'توقف و ارسال صوت' : 'ضبط و ارسال مستقیم صوت') : 'ضبط صوت پشتیبانی نمی‌شود'}
-                        type="button"
-                        variant="ghost"
-                        onClick={() => void toggleRecording()}
-                     >
-                        {recording ? <MicOff className="size-4" /> : <Mic className="size-4" />}
-                     </Button>
+                     <div className="flex items-center gap-2">
+                        <Button
+                           aria-label={recording ? 'توقف ضبط صدا و ارسال' : 'شروع ضبط پیام صوتی'}
+                           className={cn(
+                              'size-8 rounded-full border border-white/10 bg-transparent text-zinc-400 hover:bg-white/8 hover:text-zinc-100',
+                              recording && 'border-rose-400/30 bg-rose-500/10 text-rose-200'
+                           )}
+                           disabled={submitting || !voiceSupported}
+                           size="icon"
+                           title={voiceSupported ? (recording ? 'توقف و ارسال صوت' : 'ضبط و ارسال مستقیم صوت') : 'ضبط صوت پشتیبانی نمی‌شود'}
+                           type="button"
+                           variant="ghost"
+                           onClick={() => void toggleRecording()}
+                        >
+                           {recording ? <MicOff className="size-4" /> : <Mic className="size-4" />}
+                        </Button>
+                        {recording ? (
+                           <Button
+                              className="h-8 rounded-full border border-white/10 bg-transparent px-3 text-xs text-zinc-300 hover:bg-white/8 hover:text-zinc-100"
+                              disabled={submitting}
+                              type="button"
+                              variant="ghost"
+                              onClick={cancelRecording}
+                           >
+                              لغو
+                           </Button>
+                        ) : null}
+                     </div>
                      <Button
                         className="h-8 gap-2 rounded-full bg-zinc-100 px-3 text-zinc-950 hover:bg-white"
                         disabled={submitting || !draft.trim()}
@@ -362,7 +433,15 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
                        : 'text-zinc-500'
                )}
             />
-            <p className="whitespace-pre-wrap break-words">{message.content}</p>
+            <div className="min-w-0 space-y-1.5">
+               <p className="whitespace-pre-wrap break-words">{message.content}</p>
+               {message.audioUrl ? (
+                  <audio className="h-8 w-full max-w-[260px]" controls preload="metadata">
+                     <source src={message.audioUrl} type={message.audioMimeType || 'audio/webm'} />
+                     مرورگر شما از پخش صوت پشتیبانی نمی‌کند.
+                  </audio>
+               ) : null}
+            </div>
          </div>
       </div>
    );
@@ -370,7 +449,10 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
 
 function buildHistory(messages: AssistantMessage[]): AssistantHistoryItem[] {
    return messages
-      .map((message) => ({ role: message.role, content: message.content.trim() }))
+      .map((message) => ({
+         role: message.role,
+         content: (message.transcript || message.content).trim(),
+      }))
       .filter((message) => message.content.length > 0)
       .slice(-20);
 }

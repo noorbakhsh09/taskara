@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { prisma, type IntegrationAccount, type Prisma } from '@taskara/db';
+import { priorityLabel, statusLabel } from '@taskara/shared';
 import { z } from 'zod';
 import { config } from '../config';
 import { getRequestActor, requireWorkspaceAdmin } from '../services/actor';
@@ -546,15 +547,52 @@ function mergeUsageStats(
   };
 }
 
-async function recordUsageStats(credentialId: string, snapshot: AiUsageSnapshot): Promise<void> {
-  const meaningfulUsage =
-    snapshot.promptTokens > 0 ||
-    snapshot.completionTokens > 0 ||
-    snapshot.totalTokens > 0 ||
-    (snapshot.costUsd !== null && snapshot.costUsd > 0);
-  if (!meaningfulUsage) return;
+function accumulateUsageStats(
+  current: AiWorkspaceSettings['usage'],
+  next: AiWorkspaceSettings['usage']
+): AiWorkspaceSettings['usage'] {
+  let lastRequestAt = current.lastRequestAt;
+  if (next.lastRequestAt) {
+    if (!lastRequestAt) {
+      lastRequestAt = next.lastRequestAt;
+    } else {
+      const currentDate = new Date(lastRequestAt);
+      const nextDate = new Date(next.lastRequestAt);
+      if (!Number.isNaN(nextDate.getTime()) && (Number.isNaN(currentDate.getTime()) || nextDate > currentDate)) {
+        lastRequestAt = next.lastRequestAt;
+      }
+    }
+  }
 
+  return {
+    totalRequests: current.totalRequests + next.totalRequests,
+    totalPromptTokens: current.totalPromptTokens + next.totalPromptTokens,
+    totalCompletionTokens: current.totalCompletionTokens + next.totalCompletionTokens,
+    totalTokens: current.totalTokens + next.totalTokens,
+    totalCostUsd: current.totalCostUsd + next.totalCostUsd,
+    costedRequests: current.costedRequests + next.costedRequests,
+    lastRequestAt
+  };
+}
+
+function aggregateUsageStats(accounts: IntegrationAccount[]): AiWorkspaceSettings['usage'] {
+  return accounts.reduce<AiWorkspaceSettings['usage']>(
+    (aggregate, account) => accumulateUsageStats(aggregate, extractUsageStats(account.config)),
+    {
+      totalRequests: 0,
+      totalPromptTokens: 0,
+      totalCompletionTokens: 0,
+      totalTokens: 0,
+      totalCostUsd: 0,
+      costedRequests: 0,
+      lastRequestAt: null
+    }
+  );
+}
+
+async function recordUsageStats(credentialId: string, snapshot: AiUsageSnapshot): Promise<void> {
   await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT 1 FROM "IntegrationAccount" WHERE "id" = ${credentialId} FOR UPDATE`;
     const account = await tx.integrationAccount.findUnique({ where: { id: credentialId } });
     if (!account) return;
     const raw = configObject(account.config);
@@ -635,7 +673,7 @@ function serializeWorkspaceSettings(accounts: IntegrationAccount[]): AiWorkspace
     model: activeConfig.model,
     hasApiKey: accountHasApiKey(active),
     maskedKey: accountMaskedKey(active),
-    usage: extractUsageStats(active?.config),
+    usage: aggregateUsageStats(accounts),
     defaultContext: activeConfig.defaultContext,
     updatedAt: active ? active.updatedAt.toISOString() : null,
     items
@@ -971,15 +1009,87 @@ async function requestOpenAiCompatibleAnalysis(
   const completionTokens = nonNegativeInt(usageRaw.completion_tokens);
   const totalTokens = nonNegativeInt(usageRaw.total_tokens) || (promptTokens + completionTokens);
   const costCandidate = numberOrNull(usageRaw.cost) ?? numberOrNull(usageRaw.total_cost);
+  let usage: AiUsageSnapshot = {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    costUsd: costCandidate !== null && costCandidate >= 0 ? costCandidate : null,
+  };
+
+  usage = await fillUsageFromOpenRouterGeneration({
+    apiKey,
+    payload,
+    usage,
+    extraHeaders
+  });
 
   return {
     content,
-    usage: {
-      promptTokens,
-      completionTokens,
-      totalTokens,
-      costUsd: costCandidate !== null && costCandidate >= 0 ? costCandidate : null,
-    },
+    usage,
+  };
+}
+
+async function fetchOpenRouterGenerationUsage(params: {
+  apiKey: string;
+  generationId: string;
+  extraHeaders?: Record<string, string>;
+}): Promise<AiUsageSnapshot | null> {
+  const response = await fetch(`https://openrouter.ai/api/v1/generation?id=${encodeURIComponent(params.generationId)}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+      ...(params.extraHeaders || {})
+    }
+  });
+
+  if (!response.ok) return null;
+  const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (!payload || typeof payload !== 'object') return null;
+  const dataRaw = payload.data;
+  const data =
+    dataRaw && typeof dataRaw === 'object' && !Array.isArray(dataRaw)
+      ? dataRaw as Record<string, unknown>
+      : payload;
+
+  const promptTokens = nonNegativeInt(data.native_tokens_prompt) || nonNegativeInt(data.tokens_prompt);
+  const completionTokens = nonNegativeInt(data.native_tokens_completion) || nonNegativeInt(data.tokens_completion);
+  const totalTokens = nonNegativeInt(data.total_tokens) || (promptTokens + completionTokens);
+  const costCandidate = numberOrNull(data.total_cost) ?? numberOrNull(data.cost);
+
+  if (promptTokens === 0 && completionTokens === 0 && totalTokens === 0 && (costCandidate === null || costCandidate < 0)) {
+    return null;
+  }
+
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    costUsd: costCandidate !== null && costCandidate >= 0 ? costCandidate : null
+  };
+}
+
+async function fillUsageFromOpenRouterGeneration(params: {
+  apiKey: string;
+  payload: Record<string, unknown> | null;
+  usage: AiUsageSnapshot;
+  extraHeaders?: Record<string, string>;
+}): Promise<AiUsageSnapshot> {
+  if (params.usage.totalTokens > 0 && params.usage.costUsd !== null) return params.usage;
+  const generationId = typeof params.payload?.id === 'string' ? params.payload.id.trim() : '';
+  if (!generationId) return params.usage;
+
+  const fallback = await fetchOpenRouterGenerationUsage({
+    apiKey: params.apiKey,
+    generationId,
+    extraHeaders: params.extraHeaders
+  }).catch(() => null);
+  if (!fallback) return params.usage;
+
+  return {
+    promptTokens: params.usage.promptTokens > 0 ? params.usage.promptTokens : fallback.promptTokens,
+    completionTokens: params.usage.completionTokens > 0 ? params.usage.completionTokens : fallback.completionTokens,
+    totalTokens: params.usage.totalTokens > 0 ? params.usage.totalTokens : fallback.totalTokens,
+    costUsd: params.usage.costUsd !== null ? params.usage.costUsd : fallback.costUsd
   };
 }
 
@@ -1051,15 +1161,22 @@ async function transcribeAudioWithOpenRouter(params: {
   const outputTokens = nonNegativeInt(usageRaw.output_tokens);
   const totalTokens = nonNegativeInt(usageRaw.total_tokens) || (inputTokens + outputTokens);
   const costCandidate = numberOrNull(usageRaw.cost) ?? numberOrNull(usageRaw.total_cost);
+  let usage: AiUsageSnapshot = {
+    promptTokens: inputTokens,
+    completionTokens: outputTokens,
+    totalTokens,
+    costUsd: costCandidate !== null && costCandidate >= 0 ? costCandidate : null
+  };
+  usage = await fillUsageFromOpenRouterGeneration({
+    apiKey: params.apiKey,
+    payload,
+    usage,
+    extraHeaders: { 'HTTP-Referer': 'https://taskara.local', 'X-Title': 'Taskara AI Assistant' }
+  });
 
   return {
     text,
-    usage: {
-      promptTokens: inputTokens,
-      completionTokens: outputTokens,
-      totalTokens,
-      costUsd: costCandidate !== null && costCandidate >= 0 ? costCandidate : null
-    }
+    usage
   };
 }
 
@@ -1227,11 +1344,38 @@ async function generateAssistantCommandPlan(params: {
 
   const parsedJson = extractFirstJsonObject(result.content);
   if (!parsedJson) {
-    throw new HttpError(502, 'AI model did not return a valid command plan');
+    return {
+      plan: {
+        action: 'clarify',
+        response: 'نتونستم پیام را با اطمینان به یک فرمان قابل اجرا تبدیل کنم. لطفا پروژه، عنوان تسک، مسئول و سررسید را واضح‌تر بفرست.',
+        actions: [],
+        task: null,
+        update: null,
+        query: null,
+        bulk: null
+      },
+      usage: result.usage
+    };
+  }
+
+  const parsedPlan = assistantCommandPlanSchema.safeParse(parsedJson);
+  if (!parsedPlan.success) {
+    return {
+      plan: {
+        action: 'clarify',
+        response: 'نتونستم پیام را دقیق parse کنم. لطفا درخواست را کوتاه‌تر و با جزئیات پروژه/مسئول ارسال کن.',
+        actions: [],
+        task: null,
+        update: null,
+        query: null,
+        bulk: null
+      },
+      usage: result.usage
+    };
   }
 
   return {
-    plan: assistantCommandPlanSchema.parse(parsedJson),
+    plan: parsedPlan.data,
     usage: result.usage
   };
 }
@@ -1567,7 +1711,12 @@ async function executeQueryTasksPlan(
       }));
 
     const lines = items.length
-      ? items.map((item) => `- ${item.assignee}: ${item.key} | ${item.title}`)
+      ? items.map((item) =>
+          [
+            `- ${item.assignee} | ${item.key} | ${item.title}`,
+            `  پروژه: ${item.project} | زمان انجام: ${formatFaDateTime(item.completedAt)}`
+          ].join('\n')
+        )
       : ['- موردی پیدا نشد.'];
 
     return assistantResponse('completed', `آخرین تسک‌های انجام‌شده هر شخص:\n${lines.join('\n')}`, {
@@ -1612,7 +1761,18 @@ async function executeQueryTasksPlan(
   });
 
   const lines = items.length
-    ? items.map((task) => `- ${task.key} [${task.status}] ${task.title}`)
+    ? items.map((task) =>
+        formatTaskLineFa({
+          key: task.key,
+          title: task.title,
+          status: task.status,
+          priority: task.priority,
+          project: task.project?.name || '-',
+          assignee: task.assignee?.name || null,
+          dueAt: task.dueAt?.toISOString() || null,
+          completedAt: task.completedAt?.toISOString() || null
+        })
+      )
     : ['- موردی پیدا نشد.'];
 
   const label =
@@ -1906,6 +2066,37 @@ function assistantErrorMessage(error: unknown): string {
   if (/Task not found/i.test(message)) return 'تسک را پیدا نکردم یا به آن دسترسی نداری. کلید تسک را اصلاح کن.';
   if (error instanceof HttpError && error.statusCode >= 400 && error.statusCode < 500) return message;
   return 'نتونستم این کار را انجام بدهم. پیام را کمی دقیق‌تر بفرست یا تنظیمات AI را بررسی کن.';
+}
+
+function formatFaDateTime(value: string | null | undefined): string {
+  if (!value) return 'ندارد';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'ندارد';
+  return new Intl.DateTimeFormat('fa-IR-u-ca-persian', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).format(date);
+}
+
+function formatTaskLineFa(input: {
+  key: string;
+  title: string;
+  status: (typeof TASK_STATUS_VALUES)[number];
+  priority: (typeof TASK_PRIORITY_VALUES)[number];
+  project: string;
+  assignee?: string | null;
+  dueAt?: string | null;
+  completedAt?: string | null;
+}): string {
+  return [
+    `- ${input.key} | ${input.title}`,
+    `  وضعیت: ${statusLabel(input.status)} | اولویت: ${priorityLabel(input.priority)} | پروژه: ${input.project}`,
+    `  مسئول: ${input.assignee || 'ندارد'} | سررسید: ${formatFaDateTime(input.dueAt || null)} | انجام‌شده: ${formatFaDateTime(input.completedAt || null)}`
+  ].join('\n');
 }
 
 export async function registerAiReportRoutes(app: FastifyInstance): Promise<void> {
