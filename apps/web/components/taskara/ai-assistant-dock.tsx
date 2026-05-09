@@ -16,35 +16,33 @@ interface AssistantMessage {
    status?: AssistantMessageStatus;
 }
 
+interface AssistantHistoryItem {
+   role: AssistantMessageRole;
+   content: string;
+}
+
+interface AssistantAudioPayload {
+   data: string;
+   mimeType: string;
+   language?: string;
+}
+
 interface AssistantApiResponse {
    ok: boolean;
    status: AssistantMessageStatus;
    message: string;
+   transcribedText?: string | null;
    task?: {
       key?: string;
       title?: string;
    };
 }
 
-interface SpeechRecognitionLike {
-   lang: string;
-   continuous: boolean;
-   interimResults: boolean;
-   start: () => void;
-   stop: () => void;
-   abort: () => void;
-   onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
-   onend: (() => void) | null;
-   onerror: (() => void) | null;
-}
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
-
 const initialMessages: AssistantMessage[] = [
    {
       id: 'assistant-welcome',
       role: 'assistant',
-      content: 'درخواستت را بنویس یا با میکروفون بگو. فعلا می‌توانم تسک بسازم، تسک را ویرایش کنم یا روی تسک کامنت بگذارم.',
+      content: 'درخواستت را بنویس یا با میکروفون بگو. اگر بخشی از دستور ناقص باشد، پیام بعدی‌ات به‌عنوان ادامه همین گفتگو پردازش می‌شود.',
    },
 ];
 
@@ -54,20 +52,26 @@ export function AiAssistantDock() {
    const [draft, setDraft] = React.useState('');
    const [submitting, setSubmitting] = React.useState(false);
    const [recording, setRecording] = React.useState(false);
-   const recognitionRef = React.useRef<SpeechRecognitionLike | null>(null);
+   const recorderRef = React.useRef<MediaRecorder | null>(null);
+   const chunksRef = React.useRef<BlobPart[]>([]);
    const messagesEndRef = React.useRef<HTMLDivElement | null>(null);
-   const speechSupported = Boolean(speechRecognitionConstructor());
+   const voiceSupported =
+      typeof window !== 'undefined' &&
+      typeof MediaRecorder !== 'undefined' &&
+      !!navigator.mediaDevices?.getUserMedia;
 
    React.useEffect(() => {
       if (!open) return;
       messagesEndRef.current?.scrollIntoView({ block: 'end' });
    }, [messages, open]);
 
-   React.useEffect(() => () => {
-      recognitionRef.current?.abort();
+   React.useEffect(() => {
+      return () => {
+         recorderRef.current?.stop();
+      };
    }, []);
 
-   async function submitMessage(event?: React.FormEvent<HTMLFormElement>) {
+   async function submitTextMessage(event?: React.FormEvent<HTMLFormElement>) {
       event?.preventDefault();
       const text = draft.trim();
       if (!text || submitting) return;
@@ -77,25 +81,54 @@ export function AiAssistantDock() {
          role: 'user',
          content: text,
       };
+      const history = buildHistory(messages);
+
       setMessages((current) => [...current, userMessage]);
       setDraft('');
-      setSubmitting(true);
+      await sendAssistantRequest({ message: text, history });
+   }
 
+   async function submitAudioMessage(audio: AssistantAudioPayload) {
+      if (submitting) return;
+      const userMessage: AssistantMessage = {
+         id: crypto.randomUUID(),
+         role: 'user',
+         content: 'پیام صوتی ارسال شد.',
+      };
+      const history = buildHistory(messages);
+
+      setMessages((current) => [...current, userMessage]);
+      await sendAssistantRequest({ message: '', history, audio });
+   }
+
+   async function sendAssistantRequest(input: {
+      message: string;
+      history: AssistantHistoryItem[];
+      audio?: AssistantAudioPayload;
+   }) {
+      setSubmitting(true);
       try {
          const response = await taskaraRequest<AssistantApiResponse>('/ai/assistant/message', {
             method: 'POST',
             body: JSON.stringify({
-               message: text,
+               message: input.message,
+               history: input.history,
+               audio: input.audio,
                clientNow: new Date().toISOString(),
                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             }),
          });
+
+         const assistantMessage = response.transcribedText?.trim()
+            ? `${response.message}\n\nمتن تشخیص‌داده‌شده:\n${response.transcribedText.trim()}`
+            : response.message;
+
          setMessages((current) => [
             ...current,
             {
                id: crypto.randomUUID(),
                role: 'assistant',
-               content: response.message,
+               content: assistantMessage,
                status: response.status,
             },
          ]);
@@ -119,38 +152,60 @@ export function AiAssistantDock() {
       }
    }
 
-   function toggleRecording() {
+   async function toggleRecording() {
       if (recording) {
-         recognitionRef.current?.stop();
-         setRecording(false);
+         recorderRef.current?.stop();
          return;
       }
 
-      const Recognition = speechRecognitionConstructor();
-      if (!Recognition) {
-         toast.error('مرورگر شما ورودی صوتی را پشتیبانی نمی‌کند.');
+      if (!voiceSupported) {
+         toast.error('مرورگر شما ضبط مستقیم صدا را پشتیبانی نمی‌کند.');
          return;
       }
 
-      const recognition = new Recognition();
-      recognition.lang = 'fa-IR';
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.onresult = (event) => {
-         const transcript = Array.from(event.results)
-            .map((result) => result[0]?.transcript || '')
-            .join(' ')
-            .trim();
-         if (transcript) setDraft(transcript);
-      };
-      recognition.onerror = () => {
+      try {
+         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+         const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+            ? 'audio/webm;codecs=opus'
+            : '';
+         const recorder = preferredMime ? new MediaRecorder(stream, { mimeType: preferredMime }) : new MediaRecorder(stream);
+         chunksRef.current = [];
+
+         recorder.ondataavailable = (event: BlobEvent) => {
+            if (event.data.size > 0) chunksRef.current.push(event.data);
+         };
+         recorder.onerror = () => {
+            setRecording(false);
+            toast.error('ضبط صدا ناموفق بود.');
+         };
+         recorder.onstop = () => {
+            setRecording(false);
+            stream.getTracks().forEach((track) => track.stop());
+
+            const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+            chunksRef.current = [];
+            if (!blob.size) {
+               toast.error('فایل صوتی خالی است. دوباره تلاش کن.');
+               return;
+            }
+            void audioBlobToBase64(blob)
+               .then((data) =>
+                  submitAudioMessage({
+                     data,
+                     mimeType: blob.type || recorder.mimeType || 'audio/webm',
+                     language: 'fa',
+                  })
+               )
+               .catch(() => toast.error('پردازش پیام صوتی ناموفق بود.'));
+         };
+
+         recorderRef.current = recorder;
+         recorder.start();
+         setRecording(true);
+      } catch {
          setRecording(false);
-         toast.error('ضبط صدا ناموفق بود.');
-      };
-      recognition.onend = () => setRecording(false);
-      recognitionRef.current = recognition;
-      setRecording(true);
-      recognition.start();
+         toast.error('دسترسی میکروفون مجاز نیست یا ضبط شروع نشد.');
+      }
    }
 
    return (
@@ -192,7 +247,7 @@ export function AiAssistantDock() {
                   <div ref={messagesEndRef} />
                </div>
 
-               <form className="border-t border-white/8 p-2" onSubmit={(event) => void submitMessage(event)}>
+               <form className="border-t border-white/8 p-2" onSubmit={(event) => void submitTextMessage(event)}>
                   <Textarea
                      className="max-h-32 min-h-20 resize-none border-white/10 bg-white/[0.03] text-sm text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-indigo-300/30"
                      disabled={submitting}
@@ -201,23 +256,23 @@ export function AiAssistantDock() {
                      onChange={(event) => setDraft(event.target.value)}
                      onKeyDown={(event) => {
                         if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-                           void submitMessage();
+                           void submitTextMessage();
                         }
                      }}
                   />
                   <div className="mt-2 flex items-center justify-between gap-2">
                      <Button
-                        aria-label={recording ? 'توقف ضبط صدا' : 'ضبط پیام صوتی'}
+                        aria-label={recording ? 'توقف ضبط صدا و ارسال' : 'شروع ضبط پیام صوتی'}
                         className={cn(
                            'size-8 rounded-full border border-white/10 bg-transparent text-zinc-400 hover:bg-white/8 hover:text-zinc-100',
                            recording && 'border-rose-400/30 bg-rose-500/10 text-rose-200'
                         )}
-                        disabled={submitting || !speechSupported}
+                        disabled={submitting || !voiceSupported}
                         size="icon"
-                        title={speechSupported ? 'پیام صوتی' : 'ورودی صوتی در این مرورگر پشتیبانی نمی‌شود'}
+                        title={voiceSupported ? (recording ? 'توقف و ارسال صوت' : 'ضبط و ارسال مستقیم صوت') : 'ضبط صوت پشتیبانی نمی‌شود'}
                         type="button"
                         variant="ghost"
-                        onClick={toggleRecording}
+                        onClick={() => void toggleRecording()}
                      >
                         {recording ? <MicOff className="size-4" /> : <Mic className="size-4" />}
                      </Button>
@@ -283,11 +338,29 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
    );
 }
 
-function speechRecognitionConstructor(): SpeechRecognitionConstructor | null {
-   if (typeof window === 'undefined') return null;
-   const candidate = window as Window & {
-      SpeechRecognition?: SpeechRecognitionConstructor;
-      webkitSpeechRecognition?: SpeechRecognitionConstructor;
-   };
-   return candidate.SpeechRecognition || candidate.webkitSpeechRecognition || null;
+function buildHistory(messages: AssistantMessage[]): AssistantHistoryItem[] {
+   return messages
+      .map((message) => ({ role: message.role, content: message.content.trim() }))
+      .filter((message) => message.content.length > 0)
+      .slice(-20);
+}
+
+function audioBlobToBase64(blob: Blob): Promise<string> {
+   return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('Failed to read audio blob'));
+      reader.onload = () => {
+         if (typeof reader.result !== 'string') {
+            reject(new Error('Invalid FileReader result'));
+            return;
+         }
+         const data = reader.result.split(',')[1];
+         if (!data) {
+            reject(new Error('Audio base64 payload is empty'));
+            return;
+         }
+         resolve(data);
+      };
+      reader.readAsDataURL(blob);
+   });
 }

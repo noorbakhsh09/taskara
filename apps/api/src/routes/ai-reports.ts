@@ -82,9 +82,29 @@ const TASK_PRIORITY_VALUES = ['NO_PRIORITY', 'LOW', 'MEDIUM', 'HIGH', 'URGENT'] 
 const assistantActionValues = ['create_task', 'update_task', 'comment_task', 'clarify', 'unsupported'] as const;
 
 const aiAssistantMessageSchema = z.object({
-  message: z.string().trim().min(1).max(4000),
+  message: z.string().trim().max(4000).default(''),
+  history: z.array(
+    z.object({
+      role: z.enum(['user', 'assistant']),
+      content: z.string().trim().min(1).max(2000)
+    })
+  ).max(30).default([]),
+  audio: z.object({
+    data: z.string().min(8),
+    mimeType: z.string().trim().min(3).max(120),
+    model: z.string().trim().min(1).max(120).optional(),
+    language: z.string().trim().min(2).max(8).optional()
+  }).optional(),
   clientNow: z.string().datetime({ offset: true }).optional(),
   timezone: z.string().trim().min(1).max(80).optional()
+}).superRefine((value, ctx) => {
+  if (!value.message.trim() && !value.audio) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['message'],
+      message: 'Message or audio is required'
+    });
+  }
 });
 
 const assistantTaskDraftSchema = z.object({
@@ -912,11 +932,75 @@ async function generateAnalysis(
   );
 }
 
+function audioFormatFromMimeType(mimeType: string): string {
+  const normalized = mimeType.trim().toLowerCase();
+  const parts = normalized.split('/');
+  const rawSubtype = parts[1] || '';
+  const subtype = rawSubtype.split(';')[0]?.split('+')[0] || '';
+  if (!subtype) return 'wav';
+  if (subtype === 'x-wav') return 'wav';
+  return subtype;
+}
+
+async function transcribeAudioWithOpenRouter(params: {
+  apiKey: string;
+  inputAudioBase64: string;
+  mimeType: string;
+  model?: string;
+  language?: string;
+}): Promise<{ text: string; usage: AiUsageSnapshot }> {
+  const model = params.model?.trim() || 'openai/whisper-large-v3';
+  const response = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${params.apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://taskara.local',
+      'X-Title': 'Taskara AI Assistant'
+    },
+    body: JSON.stringify({
+      input_audio: {
+        data: params.inputAudioBase64,
+        format: audioFormatFromMimeType(params.mimeType)
+      },
+      model,
+      ...(params.language?.trim() ? { language: params.language.trim() } : {})
+    })
+  });
+
+  const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (!response.ok) {
+    throw new HttpError(502, extractOpenRouterErrorMessage(payload) || 'Audio transcription failed');
+  }
+
+  const text = payload && typeof payload.text === 'string' ? payload.text.trim() : '';
+  if (!text) throw new HttpError(502, 'Audio transcription returned empty text');
+
+  const usageRaw = payload?.usage && typeof payload.usage === 'object' && !Array.isArray(payload.usage)
+    ? payload.usage as Record<string, unknown>
+    : {};
+  const inputTokens = nonNegativeInt(usageRaw.input_tokens);
+  const outputTokens = nonNegativeInt(usageRaw.output_tokens);
+  const totalTokens = nonNegativeInt(usageRaw.total_tokens) || (inputTokens + outputTokens);
+  const costCandidate = numberOrNull(usageRaw.cost) ?? numberOrNull(usageRaw.total_cost);
+
+  return {
+    text,
+    usage: {
+      promptTokens: inputTokens,
+      completionTokens: outputTokens,
+      totalTokens,
+      costUsd: costCandidate !== null && costCandidate >= 0 ? costCandidate : null
+    }
+  };
+}
+
 async function generateAssistantCommandPlan(params: {
   apiKey: string;
   model: string;
   defaultContext?: string | null;
   message: string;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
   clientNow?: string;
   timezone?: string;
   actorName: string;
@@ -1017,6 +1101,11 @@ async function generateAssistantCommandPlan(params: {
     '',
     'context:',
     JSON.stringify(contextPayload, null, 2),
+    '',
+    'history:',
+    params.history.length
+      ? JSON.stringify(params.history.slice(-12), null, 2)
+      : '[]',
     '',
     `پیام کاربر: ${params.message}`
   ].join('\n');
@@ -1401,12 +1490,40 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
     const effectiveModel = actor.user.aiModel
       ? normalizeOpenRouterModel(actor.user.aiModel)
       : aiConfig.model;
+    let messageText = input.message.trim();
+    let transcribedText: string | null = null;
+
+    if (input.audio) {
+      const transcription = await transcribeAudioWithOpenRouter({
+        apiKey: storedApiKey,
+        inputAudioBase64: input.audio.data,
+        mimeType: input.audio.mimeType,
+        model: input.audio.model,
+        language: input.audio.language
+      });
+      await recordUsageStats(selectedCredential.id, transcription.usage);
+      transcribedText = transcription.text;
+      if (!messageText) messageText = transcription.text;
+    }
+
+    if (!messageText) {
+      return {
+        ...assistantResponse('needs_clarification', 'پیام صوتی یا متنی معتبر دریافت نشد. دوباره تلاش کن.'),
+        ai: {
+          provider: aiConfig.provider,
+          model: effectiveModel,
+          credentialId: selectedCredential.id
+        }
+      };
+    }
+
     const context = await loadAssistantContext(actor);
     const planner = await generateAssistantCommandPlan({
       apiKey: storedApiKey,
       model: effectiveModel,
       defaultContext: aiConfig.defaultContext,
-      message: input.message,
+      message: messageText,
+      history: input.history,
       clientNow: input.clientNow,
       timezone: input.timezone,
       actorName: actor.user.name,
@@ -1439,7 +1556,10 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
         kind: 'TRIAGE',
         status: 'COMPLETED',
         input: {
-          message: input.message,
+          message: messageText,
+          inputMessage: input.message.trim() || null,
+          transcribedText,
+          history: input.history,
           clientNow: input.clientNow || null,
           timezone: input.timezone || null
         },
@@ -1454,6 +1574,7 @@ export async function registerAiReportRoutes(app: FastifyInstance): Promise<void
 
     return {
       ...result,
+      transcribedText,
       ai: {
         provider: aiConfig.provider,
         model: effectiveModel,

@@ -85,6 +85,8 @@ const inputClassName =
    'border-white/10 bg-[#111113] text-zinc-100 placeholder:text-zinc-600 shadow-none focus-visible:border-indigo-400/50 focus-visible:ring-indigo-400/25';
 const selectClassName =
    'flex h-9 w-full rounded-md border border-white/10 bg-[#111113] px-3 text-sm text-zinc-200 outline-none transition focus:border-indigo-400/50 focus:ring-2 focus:ring-indigo-400/25 disabled:cursor-not-allowed disabled:opacity-55';
+const aiModelOptions = ['x-ai/grok-4.1-fast', 'deepseek/deepseek-v4-flash'] as const;
+const defaultAiModel = aiModelOptions[0];
 
 function isSettingsSection(value?: string): value is SettingsSection {
    return settingsSections.includes(value as SettingsSection);
@@ -919,8 +921,10 @@ function AiSettingsPage() {
    const [settings, setSettings] = useState<AiSettingsResponse | null>(null);
    const [apiKeyInput, setApiKeyInput] = useState('');
    const [defaultContextInput, setDefaultContextInput] = useState('');
+   const [selectedAiModel, setSelectedAiModel] = useState<string>(defaultAiModel);
    const [loading, setLoading] = useState(true);
    const [saving, setSaving] = useState(false);
+   const [savingModel, setSavingModel] = useState(false);
    const [testing, setTesting] = useState(false);
    const [error, setError] = useState('');
    const [notice, setNotice] = useState('');
@@ -943,6 +947,7 @@ function AiSettingsPage() {
             setSettings(settingsResult);
             setApiKeyInput('');
             setDefaultContextInput(settingsResult.defaultContext || '');
+            setSelectedAiModel(meResult.user.aiModel || defaultAiModel);
          } catch (err) {
             if (!cancelled) setError(err instanceof Error ? err.message : 'بارگذاری تنظیمات هوش مصنوعی ناموفق بود.');
          } finally {
@@ -954,6 +959,38 @@ function AiSettingsPage() {
          cancelled = true;
       };
    }, []);
+
+   async function handleModelChange(model: string) {
+      if (savingModel || selectedAiModel === model) return;
+
+      setSavingModel(true);
+      setError('');
+      setNotice('');
+      try {
+         const result = await taskaraRequest<TaskaraMe>('/me', {
+            method: 'PATCH',
+            body: JSON.stringify({ aiModel: model }),
+         });
+
+         setMe(result);
+         setSelectedAiModel(result.user.aiModel || defaultAiModel);
+
+         const session = getAuthSession();
+         if (session) {
+            setAuthSession({
+               ...session,
+               role: result.role,
+               user: result.user,
+               workspace: result.workspace,
+            });
+         }
+         setNotice('مدل هوش مصنوعی ذخیره شد.');
+      } catch (err) {
+         setError(err instanceof Error ? err.message : 'ذخیره مدل هوش مصنوعی ناموفق بود.');
+      } finally {
+         setSavingModel(false);
+      }
+   }
 
    async function handleSaveSettings() {
       if (!isWorkspaceAdmin) return;
@@ -1018,7 +1055,7 @@ function AiSettingsPage() {
             <SettingsField
                className="sm:grid-cols-[minmax(0,1fr)_auto]"
                label="وضعیت اتصال"
-               description="کلید API برای گزارش‌گیری ذخیره می‌شود. انتخاب مدل از نوار ابزار بالای صفحه انجام می‌شود."
+               description="کلید API برای گزارش‌گیری و دستیار AI ذخیره می‌شود."
             >
                <div className="grid gap-2 text-sm sm:grid-cols-2">
                   <div className="rounded-md border border-white/8 bg-black/20 px-3 py-2">
@@ -1039,6 +1076,30 @@ function AiSettingsPage() {
                         {settings?.updatedAt ? formatJalaliDateTime(settings.updatedAt) : 'هنوز تنظیمی ذخیره نشده است.'}
                      </div>
                   </div>
+               </div>
+            </SettingsField>
+
+            <SettingsField
+               label="مدل هوش مصنوعی"
+               description="این مدل برای درخواست‌های AI کاربر فعلی استفاده می‌شود."
+            >
+               <div className="flex items-center gap-3">
+                  <select
+                     className={cn(selectClassName, 'ltr')}
+                     disabled={loading || savingModel}
+                     value={selectedAiModel}
+                     onChange={(event) => void handleModelChange(event.target.value)}
+                  >
+                     {!aiModelOptions.includes(selectedAiModel as (typeof aiModelOptions)[number]) ? (
+                        <option value={selectedAiModel}>{selectedAiModel}</option>
+                     ) : null}
+                     {aiModelOptions.map((model) => (
+                        <option key={model} value={model}>
+                           {model}
+                        </option>
+                     ))}
+                  </select>
+                  {savingModel ? <Loader2 className="size-4 shrink-0 animate-spin text-zinc-500" /> : null}
                </div>
             </SettingsField>
 
