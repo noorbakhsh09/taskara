@@ -2403,7 +2403,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                            }
                            placeholder={fa.issue.titlePlaceholder}
                         />
-                        <Tooltip>
+                        {/* <Tooltip>
                            <TooltipTrigger asChild>
                               <button
                                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-white/12 bg-transparent text-zinc-400 transition hover:bg-white/8 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -2421,7 +2421,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                            <TooltipContent className="border-white/10 bg-[#202023] text-zinc-200" side="bottom">
                               بهبود و خلاصه‌سازی متن با AI
                            </TooltipContent>
-                        </Tooltip>
+                        </Tooltip> */}
                      </div>
                      <DescriptionEditor
                         className="mt-2"

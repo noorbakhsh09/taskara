@@ -686,7 +686,7 @@ export function IssuePage() {
                      <Loader2 className="absolute left-0 top-3 size-4 animate-spin text-zinc-500" />
                   ) : null}
                </div>
-               <Tooltip>
+               {/* <Tooltip>
                   <TooltipTrigger asChild>
                      <button
                         className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-white/12 bg-transparent text-zinc-400 transition hover:bg-white/8 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -704,7 +704,7 @@ export function IssuePage() {
                   <TooltipContent className="border-white/10 bg-[#202023] text-zinc-200" side="bottom">
                      بهبود و خلاصه‌سازی متن با AI
                   </TooltipContent>
-               </Tooltip>
+               </Tooltip> */}
             </div>
 
             <section className="mt-6">

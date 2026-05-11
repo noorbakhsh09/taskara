@@ -624,7 +624,7 @@ export default function MainLayout({ children, header, headersNumber = 2, showSi
                </div>
             </div>
          </div>
-         <AiAssistantDock />
+         {/* <AiAssistantDock /> */}
          <CommandDialog
             description={fa.command.description}
             contentClassName="max-w-[760px] sm:max-w-[760px]"
