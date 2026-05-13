@@ -259,6 +259,7 @@ export const fa = {
       loadFailed: 'بارگذاری کارها ناموفق بود.',
       created: 'کار ایجاد شد.',
       createdOffline: 'کار ایجاد شد و پس از اتصال همگام‌سازی می‌شود.',
+      openIssue: 'باز کردن کار',
       deleted: 'کار حذف شد.',
       deleteConfirm: 'این کار حذف شود؟',
       pendingSync: 'در انتظار همگام‌سازی',

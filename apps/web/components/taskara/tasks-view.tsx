@@ -1729,7 +1729,15 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       }
 
       const createdLocally = createdTask.syncState === 'pending';
-      toast.success(createdLocally ? fa.issue.createdOffline : fa.issue.created);
+      toast.success(createdTask.title, {
+         description: createdLocally ? fa.issue.createdOffline : fa.issue.created,
+         action: createdLocally
+            ? undefined
+            : {
+                 label: fa.issue.openIssue,
+                 onClick: () => openIssuePage(createdTask),
+              },
+      });
 
       if (!filesToUpload.length) return;
       if (createdLocally) {
