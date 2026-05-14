@@ -383,14 +383,8 @@ export function IssuePage() {
       const optimistic = applyIssuePatch(task, patch, users, projects);
       setTask(optimistic);
       try {
-         const { entity: updated } = await sendTaskSyncMutation<TaskaraTask>('task.update', {
-            idOrKey: task.key,
-            baseVersion: task.version,
-            patch,
-         });
-         if (!updated) throw new Error(fa.issue.updateFailed);
+         const updated = await taskSync.updateTask(task, patch);
          setTask((current) => (current ? { ...current, ...updated } : updated));
-         taskSync.applyTask(updated);
          await loadActivity(updated.key || task.key);
          if (updated.key && updated.key !== task.key) {
             navigate(`/${orgId || 'taskara'}/issue/${encodeURIComponent(updated.key)}`, {

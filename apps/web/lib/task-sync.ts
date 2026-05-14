@@ -7,7 +7,7 @@ import type { TaskaraProject, TaskaraTask, TaskaraTeam, TaskaraUser, TaskaraView
 export type TaskUpdatePatch = {
    title?: string;
    description?: string | null;
-   projectId?: string;
+   projectId?: string | null;
    status?: string;
    priority?: string;
    weight?: number | null;
@@ -215,7 +215,7 @@ export function useTaskSync(scope: TaskSyncScope) {
                      if (event.clientId === clientId && event.mutationId) {
                         next = next.filter((task) => task.syncMutationId !== event.mutationId);
                      }
-                     next = upsertTask(next, event.task);
+                     next = upsertTask(next, event.task, { preservePending: event.clientId !== clientId || !event.mutationId });
                   } else if (event.type === 'delete' || event.type === 'removeFromScope') {
                      next = next.filter((task) => task.id !== event.taskId && task.key !== event.taskKey);
                   }
@@ -413,15 +413,11 @@ export function useTaskSync(scope: TaskSyncScope) {
          });
       };
       const interval = window.setInterval(handleWake, 60000);
-      window.addEventListener('focus', handleWake);
       window.addEventListener('online', handleWake);
-      document.addEventListener('visibilitychange', handleWake);
       handleWake();
       return () => {
          window.clearInterval(interval);
-         window.removeEventListener('focus', handleWake);
          window.removeEventListener('online', handleWake);
-         document.removeEventListener('visibilitychange', handleWake);
       };
    }, [clientId, loading, pull, refresh]);
 
@@ -567,22 +563,20 @@ export function useTaskSyncPulse(onPulse: () => void, enabled = true) {
          if (document.visibilityState === 'hidden') return;
          void flushPendingTaskSyncMutations(clientId).then(() => onPulseRef.current());
       };
-      const interval = window.setInterval(handleWake, 60000);
-      window.addEventListener('focus', handleWake);
       window.addEventListener('online', handleWake);
-      document.addEventListener('visibilitychange', handleWake);
 
       return () => {
          controller.abort();
-         window.clearInterval(interval);
-         window.removeEventListener('focus', handleWake);
          window.removeEventListener('online', handleWake);
-         document.removeEventListener('visibilitychange', handleWake);
       };
    }, [clientId, enabled]);
 }
 
-function upsertTask(tasks: TaskaraTask[], task: TaskaraTask): TaskaraTask[] {
+function upsertTask(
+   tasks: TaskaraTask[],
+   task: TaskaraTask,
+   options: { preservePending?: boolean } = {}
+): TaskaraTask[] {
    const existingIndex = tasks.findIndex(
       (item) =>
          item.id === task.id ||
@@ -591,6 +585,14 @@ function upsertTask(tasks: TaskaraTask[], task: TaskaraTask): TaskaraTask[] {
    );
    if (existingIndex === -1) return [task, ...tasks];
    const next = [...tasks];
+   if (
+      options.preservePending &&
+      next[existingIndex].syncState === 'pending' &&
+      next[existingIndex].syncMutationId &&
+      next[existingIndex].syncMutationId !== task.syncMutationId
+   ) {
+      return next;
+   }
    const merged = { ...next[existingIndex], ...task };
    if (!task.syncState) {
       delete merged.syncState;
@@ -735,17 +737,17 @@ function applyPatch(task: TaskaraTask, patch: TaskUpdatePatch, resources: TaskSy
       delete (next as TaskaraTask & { assigneeId?: string | null }).assigneeId;
    }
 
-   if (patch.projectId) {
-      const project = resources.projects.find((item) => item.id === patch.projectId);
-      if (project) {
-         next.project = {
-            id: project.id,
-            name: project.name,
-            keyPrefix: project.keyPrefix,
-            team: project.team || null,
-         };
-      }
-      delete (next as TaskaraTask & { projectId?: string }).projectId;
+   if ('projectId' in patch) {
+      const project = patch.projectId ? resources.projects.find((item) => item.id === patch.projectId) || null : null;
+      next.project = project
+         ? {
+              id: project.id,
+              name: project.name,
+              keyPrefix: project.keyPrefix,
+              team: project.team || null,
+           }
+         : null;
+      delete (next as TaskaraTask & { projectId?: string | null }).projectId;
    }
 
    if (patch.labels) {
@@ -787,7 +789,7 @@ function mergeTaskCreateInput(input: TaskCreateInput, patch: TaskUpdatePatch): T
    if (patch.status !== undefined) next.status = patch.status;
    if (patch.priority !== undefined) next.priority = patch.priority;
    if (patch.weight !== undefined) next.weight = patch.weight;
-   if (patch.projectId !== undefined) next.projectId = patch.projectId;
+   if (patch.projectId) next.projectId = patch.projectId;
    if (patch.labels !== undefined) next.labels = patch.labels;
 
    if (patch.description !== undefined) {
