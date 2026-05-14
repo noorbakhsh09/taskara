@@ -31,6 +31,10 @@ type TaskCreateInput = {
 
 type BootstrapResponse = {
    cursor: string;
+   serverTime?: string;
+   completedWindowDays?: number;
+   omittedCompletedBefore?: string;
+   totalHotTasks?: number;
    tasks: TaskaraTask[];
    projects: TaskaraProject[];
    teams: TaskaraTeam[];
@@ -132,6 +136,11 @@ export class TaskSyncMutationError extends Error {
 }
 
 export type TaskSyncController = ReturnType<typeof useTaskSync>;
+export type TaskSyncStatus = 'loading' | 'ready' | 'syncing' | 'offline' | 'recovering' | 'error';
+
+type TaskSyncRefreshOptions = {
+   preserveVisibleState?: boolean;
+};
 
 export function useTaskSync(scope: TaskSyncScope) {
    const scopeKey = taskScopeKey(scope);
@@ -150,8 +159,10 @@ export function useTaskSync(scope: TaskSyncScope) {
       views: [],
    });
    const [cursor, setCursor] = useState('0');
+   const [omittedCompletedBefore, setOmittedCompletedBefore] = useState<string | null>(null);
    const [loading, setLoading] = useState(true);
    const [error, setError] = useState('');
+   const [syncStatus, setSyncStatus] = useState<TaskSyncStatus>('loading');
 
    useEffect(() => {
       scopeRef.current = scope;
@@ -162,13 +173,22 @@ export function useTaskSync(scope: TaskSyncScope) {
    }, []);
 
    const applyBootstrap = useCallback(
-      async (result: BootstrapResponse, requestedScopeKey: string, runId: number): Promise<boolean> => {
+      async (
+         result: BootstrapResponse,
+         requestedScopeKey: string,
+         runId: number,
+         options: TaskSyncRefreshOptions = {}
+      ): Promise<boolean> => {
          if (bootstrapRunRef.current !== runId || taskScopeKey(scopeRef.current) !== requestedScopeKey) return false;
-         const tasksWithPending = await applyPendingMutationsToTasks(result.tasks, clientId, requestedScopeKey);
+         const hotTasks = pruneColdCompletedTasks(result.tasks, result.omittedCompletedBefore);
+         const tasksWithPending = await applyPendingMutationsToTasks(hotTasks, clientId, requestedScopeKey);
          if (bootstrapRunRef.current !== runId || taskScopeKey(scopeRef.current) !== requestedScopeKey) return false;
          cursorRef.current = result.cursor;
          setCursor(result.cursor);
-         setTasks(tasksWithPending);
+         setOmittedCompletedBefore(result.omittedCompletedBefore || defaultOmittedCompletedBefore());
+         setTasks((current) =>
+            options.preserveVisibleState ? mergeBootstrappedTasks(current, tasksWithPending) : tasksWithPending
+         );
          setResources({
             projects: result.projects,
             teams: result.teams,
@@ -185,11 +205,12 @@ export function useTaskSync(scope: TaskSyncScope) {
    const applyEvents = useCallback(
       (events: SyncTaskEvent[], nextCursor: string, broadcast = true) => {
          if (compareCursor(nextCursor, cursorRef.current) < 0) return;
+         const taskEvents = events.filter((event) => event.type === 'upsert' || event.type === 'delete' || event.type === 'removeFromScope');
 
-         if (events.length) {
+         if (taskEvents.length) {
             setTasks((current) => {
                let next = current;
-               for (const event of events) {
+               for (const event of taskEvents) {
                   if (event.type === 'upsert' && event.task) {
                      if (event.clientId === clientId && event.mutationId) {
                         next = next.filter((task) => task.syncMutationId !== event.mutationId);
@@ -201,7 +222,6 @@ export function useTaskSync(scope: TaskSyncScope) {
                }
                return next;
             });
-            dispatchWorkspaceRefresh({ source: 'task-sync' });
          }
 
          advanceCursor(nextCursor, cursorRef, setCursor);
@@ -218,42 +238,48 @@ export function useTaskSync(scope: TaskSyncScope) {
       [clientId, scopeKey]
    );
 
-   const refresh = useCallback(async () => {
+   const refresh = useCallback(async (options: TaskSyncRefreshOptions = {}) => {
       const runId = bootstrapRunRef.current + 1;
       bootstrapRunRef.current = runId;
       const requestedScope = scopeRef.current;
       const requestedScopeKey = taskScopeKey(requestedScope);
       let restoredFromCache = false;
-      setLoading(true);
+      if (!options.preserveVisibleState) setLoading(true);
+      setSyncStatus(options.preserveVisibleState ? 'recovering' : 'loading');
       setError('');
-      bootstrappedRef.current = false;
-      if (lastBootstrappedScopeRef.current !== requestedScopeKey) {
+      if (!options.preserveVisibleState) bootstrappedRef.current = false;
+      if (!options.preserveVisibleState && lastBootstrappedScopeRef.current !== requestedScopeKey) {
          setTasks([]);
          setResources({ projects: [], teams: [], users: [], views: [] });
       }
       try {
          const cached = await loadCachedBootstrap(requestedScopeKey);
          if (cached) {
-            restoredFromCache = await applyBootstrap(cached, requestedScopeKey, runId);
-            if (restoredFromCache && bootstrapRunRef.current === runId) setLoading(false);
+            restoredFromCache = await applyBootstrap(cached, requestedScopeKey, runId, options);
+            if (restoredFromCache && bootstrapRunRef.current === runId && !options.preserveVisibleState) setLoading(false);
          }
 
          const result = await taskaraRequest<BootstrapResponse>(`/sync/bootstrap?${scopeSearch(requestedScope)}`);
          void saveCachedBootstrap(requestedScopeKey, result);
-         await applyBootstrap(result, requestedScopeKey, runId);
+         await applyBootstrap(result, requestedScopeKey, runId, options);
+         if (bootstrapRunRef.current === runId) setSyncStatus('ready');
       } catch (err) {
          if (bootstrapRunRef.current !== runId) return;
          if (!restoredFromCache) {
             setError(err instanceof Error ? err.message : 'Task sync failed.');
+            setSyncStatus(isRetryableMutationTransportError(err) ? 'offline' : 'error');
+         } else {
+            setSyncStatus('ready');
          }
       } finally {
-         if (bootstrapRunRef.current === runId) setLoading(false);
+         if (bootstrapRunRef.current === runId && !options.preserveVisibleState) setLoading(false);
       }
    }, [applyBootstrap]);
 
    const pull = useCallback(async () => {
       if (!bootstrappedRef.current || pullingRef.current) return;
       pullingRef.current = true;
+      setSyncStatus('syncing');
       try {
          let hasMore = true;
          while (hasMore) {
@@ -265,16 +291,14 @@ export function useTaskSync(scope: TaskSyncScope) {
                await refresh();
                return;
             }
-            if (result.events.some((event) => event.entityType && event.entityType !== 'task')) {
-               await refresh();
-               return;
-            }
             applyEvents(result.events, result.cursor);
             hasMore = Boolean(result.hasMore);
          }
+         setSyncStatus('ready');
       } catch (err) {
          setError(err instanceof Error ? err.message : 'Task sync pull failed.');
-         if (isUnrecoverableSyncError(err)) void refresh();
+         setSyncStatus(isRetryableMutationTransportError(err) ? 'offline' : 'error');
+         if (isUnrecoverableSyncError(err)) void refresh({ preserveVisibleState: true });
       } finally {
          pullingRef.current = false;
       }
@@ -288,13 +312,14 @@ export function useTaskSync(scope: TaskSyncScope) {
       if (!bootstrappedRef.current || loading) return;
       void saveCachedBootstrap(scopeKey, {
          cursor,
+         omittedCompletedBefore: omittedCompletedBefore || defaultOmittedCompletedBefore(),
          tasks,
          projects: resources.projects,
          teams: resources.teams,
          users: resources.users,
          views: resources.views,
       });
-   }, [cursor, loading, resources.projects, resources.teams, resources.users, resources.views, scopeKey, tasks]);
+   }, [cursor, loading, omittedCompletedBefore, resources.projects, resources.teams, resources.users, resources.views, scopeKey, tasks]);
 
    useEffect(() => {
       const handlePageShow = (event: PageTransitionEvent) => {
@@ -305,6 +330,8 @@ export function useTaskSync(scope: TaskSyncScope) {
          bootstrappedRef.current = false;
          cursorRef.current = '0';
          setCursor('0');
+         setOmittedCompletedBefore(null);
+         setSyncStatus('loading');
          setTasks([]);
          setResources({ projects: [], teams: [], users: [], views: [] });
          void refresh();
@@ -381,7 +408,7 @@ export function useTaskSync(scope: TaskSyncScope) {
       const handleWake = () => {
          if (document.visibilityState === 'hidden') return;
          void flushPendingTaskSyncMutations(clientId).then((hadFinalFailures) => {
-            if (hadFinalFailures) void refresh();
+            if (hadFinalFailures) void refresh({ preserveVisibleState: true });
             else void pull();
          });
       };
@@ -508,8 +535,10 @@ export function useTaskSync(scope: TaskSyncScope) {
       users: resources.users,
       views: resources.views,
       cursor,
+      omittedCompletedBefore,
       loading,
       error,
+      syncStatus,
       refresh,
       applyTask,
       createTask,
@@ -568,6 +597,35 @@ function upsertTask(tasks: TaskaraTask[], task: TaskaraTask): TaskaraTask[] {
       delete merged.syncMutationId;
    }
    next[existingIndex] = merged;
+   return next;
+}
+
+function mergeBootstrappedTasks(current: TaskaraTask[], bootstrapped: TaskaraTask[]): TaskaraTask[] {
+   if (current.length === 0) return bootstrapped;
+
+   const bootstrappedById = new Map(bootstrapped.map((task) => [task.id, task]));
+   const bootstrappedByKey = new Map(
+      bootstrapped
+         .filter((task) => task.key && !isLocalTaskKey(task.key))
+         .map((task) => [task.key, task])
+   );
+   const usedIds = new Set<string>();
+   const next: TaskaraTask[] = [];
+
+   for (const task of current) {
+      const replacement = bootstrappedById.get(task.id) || (task.key ? bootstrappedByKey.get(task.key) : undefined);
+      if (!replacement) {
+         if (task.syncState === 'pending') next.push(task);
+         continue;
+      }
+      next.push(replacement);
+      usedIds.add(replacement.id);
+   }
+
+   for (const task of bootstrapped) {
+      if (!usedIds.has(task.id)) next.push(task);
+   }
+
    return next;
 }
 
@@ -1146,9 +1204,14 @@ function saveCachedBootstrapFallback(snapshot: CachedScopeSnapshot): void {
 }
 
 function bootstrapFromSnapshot(snapshot: CachedScopeSnapshot): BootstrapResponse {
+   const omittedCompletedBefore = snapshot.omittedCompletedBefore || defaultOmittedCompletedBefore();
    return {
       cursor: snapshot.cursor,
-      tasks: snapshot.tasks,
+      serverTime: snapshot.serverTime,
+      completedWindowDays: snapshot.completedWindowDays,
+      omittedCompletedBefore,
+      totalHotTasks: snapshot.totalHotTasks,
+      tasks: pruneColdCompletedTasks(snapshot.tasks, omittedCompletedBefore),
       projects: snapshot.projects,
       teams: snapshot.teams,
       users: snapshot.users,
@@ -1174,12 +1237,30 @@ function isCachedScopeSnapshot(value: unknown): value is CachedScopeSnapshot {
       typeof snapshot.scopeKey === 'string' &&
       typeof snapshot.savedAt === 'string' &&
       typeof snapshot.cursor === 'string' &&
+      (snapshot.omittedCompletedBefore === undefined || typeof snapshot.omittedCompletedBefore === 'string') &&
       Array.isArray(snapshot.tasks) &&
       Array.isArray(snapshot.projects) &&
       Array.isArray(snapshot.teams) &&
       Array.isArray(snapshot.users) &&
       Array.isArray(snapshot.views)
    );
+}
+
+function pruneColdCompletedTasks(tasks: TaskaraTask[], omittedCompletedBefore?: string | null): TaskaraTask[] {
+   const cutoff = Date.parse(omittedCompletedBefore || defaultOmittedCompletedBefore());
+   if (!Number.isFinite(cutoff)) return tasks;
+
+   return tasks.filter((task) => {
+      if (task.status !== 'DONE' && task.status !== 'CANCELED') return true;
+      const completedAt = task.completedAt ? Date.parse(task.completedAt) : NaN;
+      if (Number.isFinite(completedAt)) return completedAt >= cutoff;
+      const updatedAt = task.updatedAt ? Date.parse(task.updatedAt) : NaN;
+      return Number.isFinite(updatedAt) && updatedAt >= cutoff;
+   });
+}
+
+function defaultOmittedCompletedBefore(): string {
+   return new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
 }
 
 function isTaskaraTaskEntity(value: unknown): value is TaskaraTask {

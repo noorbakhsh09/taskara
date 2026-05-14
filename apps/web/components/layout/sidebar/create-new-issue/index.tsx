@@ -87,7 +87,7 @@ export function CreateNewIssue() {
                <RiEditLine />
             </Button>
          </DialogTrigger>
-         <DialogContent className="w-full sm:max-w-[750px] p-0 shadow-xl top-[30%]">
+         <DialogContent className="w-full p-0 shadow-xl sm:max-w-[750px]">
             <DialogHeader>
                <DialogTitle>
                   <div className="flex items-center px-4 pt-4 gap-2">

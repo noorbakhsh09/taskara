@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, useTransition } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
    AtSign,
@@ -28,12 +28,11 @@ import {
    linearStatusMeta,
 } from '@/components/taskara/linear-ui';
 import { taskaraRequest } from '@/lib/taskara-client';
+import { useWorkspaceInboxSync } from '@/lib/inbox-sync';
 import { formatJalaliDateTime } from '@/lib/jalali';
-import { dispatchWorkspaceRefresh, useLiveRefresh } from '@/lib/live-refresh';
 import { getNotificationBody, getNotificationTypeLabel } from '@/lib/notification-presenters';
 import { getPriorityLabel, getStatusLabel } from '@/lib/taskara-presenters';
 import type {
-   NotificationsResponse,
    TaskaraActivity,
    TaskaraAnnouncement,
    TaskaraMeeting,
@@ -53,35 +52,31 @@ export function InboxView() {
    const location = useLocation();
    const { orgId } = useParams();
    const now = useNow();
-   const [notifications, setNotifications] = useState<TaskaraNotification[]>([]);
-   const [selected, setSelected] = useState<TaskaraNotification | null>(null);
+   const {
+      error: inboxError,
+      loading,
+      markAllRead: markAllNotificationsRead,
+      markRead: markNotificationRead,
+      notifications,
+      unreadCount,
+   } = useWorkspaceInboxSync();
+   const [selectedId, setSelectedId] = useState<string | null>(null);
    const [selectedTask, setSelectedTask] = useState<TaskaraTask | null>(null);
    const [selectedAnnouncement, setSelectedAnnouncement] = useState<TaskaraAnnouncement | null>(null);
    const [selectedMeeting, setSelectedMeeting] = useState<TaskaraMeeting | null>(null);
    const [activities, setActivities] = useState<TaskaraActivity[]>([]);
    const [error, setError] = useState('');
-   const [loading, setLoading] = useState(true);
    const [detailsLoading, setDetailsLoading] = useState(false);
-   const [unreadCount, setUnreadCount] = useState(0);
-   const [isPending, startTransition] = useTransition();
+   const selected = useMemo(
+      () => notifications.find((item) => item.id === selectedId) || notifications[0] || null,
+      [notifications, selectedId]
+   );
+   const visibleError = error || inboxError;
 
-   const load = useCallback(async () => {
-      setError('');
-      try {
-         const notificationsResult = await taskaraRequest<NotificationsResponse>('/notifications?limit=100');
-         setNotifications(notificationsResult.items);
-         setUnreadCount(notificationsResult.unreadCount);
-         setSelected(
-            (current) => notificationsResult.items.find((item) => item.id === current?.id) || notificationsResult.items[0] || null
-         );
-      } catch (err) {
-         setError(err instanceof Error ? err.message : fa.inbox.loadFailed);
-      } finally {
-         setLoading(false);
-      }
-   }, []);
-
-   useLiveRefresh(load);
+   useEffect(() => {
+      if (selectedId && notifications.some((item) => item.id === selectedId)) return;
+      setSelectedId(notifications[0]?.id || null);
+   }, [notifications, selectedId]);
 
    useEffect(() => {
       let canceled = false;
@@ -154,43 +149,16 @@ export function InboxView() {
    }, [selected?.id, selected?.task?.id, selected?.task?.key, selected?.announcement?.id, selected?.meeting?.id]);
 
    async function markRead(notification: TaskaraNotification) {
-      if (notification.readAt) return;
-      const readAt = new Date().toISOString();
-
-      setNotifications((current) =>
-         current.map((item) => (item.id === notification.id ? { ...item, readAt } : item))
-      );
-      setSelected((current) => (current?.id === notification.id ? { ...current, readAt } : current));
-      setUnreadCount((current) => Math.max(0, current - 1));
-
-      try {
-         await taskaraRequest(`/notifications/${notification.id}/read`, { method: 'PATCH' });
-         dispatchWorkspaceRefresh({ source: 'notifications:read' });
-      } catch (err) {
-         setError(err instanceof Error ? err.message : fa.inbox.markAllFailed);
-         startTransition(() => {
-            void load();
-         });
-      }
+      await markNotificationRead(notification);
    }
 
    function openNotification(notification: TaskaraNotification) {
-      setSelected(notification);
+      setSelectedId(notification.id);
       if (!notification.readAt) void markRead(notification);
    }
 
    async function markAllRead() {
-      try {
-         await taskaraRequest('/notifications/read-all', { method: 'POST', body: JSON.stringify({}) });
-         setNotifications((current) =>
-            current.map((item) => ({ ...item, readAt: item.readAt || new Date().toISOString() }))
-         );
-         setSelected((current) => (current ? { ...current, readAt: current.readAt || new Date().toISOString() } : current));
-         setUnreadCount(0);
-         dispatchWorkspaceRefresh({ source: 'notifications:read-all' });
-      } catch (err) {
-         setError(err instanceof Error ? err.message : fa.inbox.markAllFailed);
-      }
+      await markAllNotificationsRead();
    }
 
    function openFullIssue() {
@@ -259,16 +227,16 @@ export function InboxView() {
                   size="icon"
                   variant="ghost"
                   className="size-8 rounded-full text-zinc-500 hover:bg-white/[0.06] hover:text-zinc-100"
-                  disabled={isPending || unreadCount === 0}
+                  disabled={unreadCount === 0}
                   onClick={() => void markAllRead()}
                >
                   <Check className="size-4" />
                </Button>
             </div>
 
-            {error ? (
+            {visibleError ? (
                <div className="m-3 rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-2 text-xs leading-5 text-red-200">
-                  {error}
+                  {visibleError}
                </div>
             ) : null}
 

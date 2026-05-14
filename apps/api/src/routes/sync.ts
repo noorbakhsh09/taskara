@@ -31,7 +31,8 @@ const syncScopeQuerySchema = z.object({
   mine: z.coerce.boolean().optional(),
   cursor: z.string().regex(/^\d+$/).default('0'),
   limit: z.coerce.number().int().min(1).max(500).default(200),
-  clientId: z.string().trim().min(1).max(160).optional()
+  clientId: z.string().trim().min(1).max(160).optional(),
+  completedWindowDays: z.coerce.number().int().min(1).max(30).default(5)
 });
 
 const pushMutationSchema = z.object({
@@ -76,6 +77,7 @@ export async function registerSyncRoutes(app: FastifyInstance): Promise<void> {
     const query = syncScopeQuerySchema.parse(request.query);
     const accessibleTeamIds = await listAccessibleTeamIds(actor);
     if (query.teamId !== 'all') await assertActorCanAccessTeamSlug(actor, query.teamId);
+    const omittedCompletedBefore = hotCompletedCutoff(query.completedWindowDays).toISOString();
     const [tasksResult, projects, teams, usersResult, views, cursor] = await Promise.all([
       listTasksForScope(actor, query, accessibleTeamIds),
       listProjects(actor.workspace.id, accessibleTeamIds),
@@ -88,7 +90,10 @@ export async function registerSyncRoutes(app: FastifyInstance): Promise<void> {
     return {
       cursor,
       serverTime: new Date().toISOString(),
+      completedWindowDays: query.completedWindowDays,
+      omittedCompletedBefore,
       tasks: tasksResult.items,
+      totalHotTasks: tasksResult.total,
       projects,
       teams,
       users: usersResult.items,
@@ -351,7 +356,12 @@ function taskWhereForScope(
     where.project = { OR: [{ teamId: null }, { teamId: { in: accessibleTeamIds } }] };
   }
 
-  return where;
+  return {
+    AND: [
+      where,
+      hotTaskWhere(hotCompletedCutoff(query.completedWindowDays))
+    ]
+  };
 }
 
 async function listProjects(workspaceId: string, accessibleTeamIds: string[] | null) {
@@ -528,7 +538,48 @@ function taskVisibleInScope(
     if (teamId && !accessibleTeamIds.includes(teamId)) return false;
   }
 
-  return true;
+  return isHotTaskRecord(task, hotCompletedCutoff(query.completedWindowDays));
+}
+
+function hotCompletedCutoff(completedWindowDays = 5): Date {
+  return new Date(Date.now() - completedWindowDays * 24 * 60 * 60 * 1000);
+}
+
+function hotTaskWhere(cutoff: Date): Prisma.TaskWhereInput {
+  return {
+    OR: [
+      { status: { notIn: ['DONE', 'CANCELED'] } },
+      {
+        AND: [
+          { status: { in: ['DONE', 'CANCELED'] } },
+          {
+            OR: [
+              { completedAt: { gte: cutoff } },
+              { completedAt: null, updatedAt: { gte: cutoff } }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+}
+
+function isHotTaskRecord(task: Record<string, unknown>, cutoff: Date): boolean {
+  const status = stringValue(task.status);
+  if (status !== 'DONE' && status !== 'CANCELED') return true;
+
+  const completedAt = dateValue(task.completedAt);
+  if (completedAt) return completedAt >= cutoff;
+
+  const updatedAt = dateValue(task.updatedAt);
+  return Boolean(updatedAt && updatedAt >= cutoff);
+}
+
+function dateValue(value: unknown): Date | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  if (typeof value !== 'string') return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 const progressTaskStatuses = new Set(['IN_PROGRESS', 'IN_REVIEW']);

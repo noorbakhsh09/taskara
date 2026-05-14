@@ -18,6 +18,8 @@ import { TaskReportsView } from '@/components/taskara/task-reports-view';
 import { TeamsView } from '@/components/taskara/teams-view';
 import { isAiEnabledForUserId } from '@/lib/ai-access';
 import { fa } from '@/lib/fa-copy';
+import { WorkspaceInboxSyncProvider } from '@/lib/inbox-sync';
+import { WorkspaceKnowledgeSyncProvider } from '@/lib/knowledge-sync';
 import { WorkspaceTaskSyncProvider } from '@/lib/task-sync-provider';
 import { useAuthSession } from '@/store/auth-store';
 
@@ -113,7 +115,11 @@ function AuthenticatedWorkspaceShell() {
 
   return (
     <WorkspaceTaskSyncProvider workspaceSlug={orgId || session.workspace?.slug || 'taskara'}>
-      <WorkspaceShell />
+      <WorkspaceInboxSyncProvider workspaceSlug={orgId || session.workspace?.slug || 'taskara'}>
+        <WorkspaceKnowledgeSyncProvider workspaceSlug={orgId || session.workspace?.slug || 'taskara'}>
+          <WorkspaceShell />
+        </WorkspaceKnowledgeSyncProvider>
+      </WorkspaceInboxSyncProvider>
     </WorkspaceTaskSyncProvider>
   );
 }

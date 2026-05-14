@@ -8,6 +8,7 @@ import {
    ArrowRight,
    BookOpen,
    Box,
+   Check,
    Copy,
    ExternalLink,
    FileArchive,
@@ -18,14 +19,16 @@ import {
    Loader2,
    MoreHorizontal,
    Paperclip,
+   Search,
    Send,
    Sparkles,
    Tag,
    X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { DescriptionEditor } from '@/components/taskara/description-editor';
@@ -59,7 +62,6 @@ import type {
    TaskaraUser,
 } from '@/lib/taskara-types';
 import { cn } from '@/lib/utils';
-import { EMPTY_SELECT_VALUE, fromSelectValue, fromSelectValueNullable, toSelectValue } from '@/lib/select-utils';
 import { useAuthSession } from '@/store/auth-store';
 
 type TaskUpdatePatch = {
@@ -92,6 +94,33 @@ type IssueReturnLocation = {
 type IssueLocationState = {
    from?: IssueReturnLocation | string;
 };
+
+const assigneeSearchPlaceholder = 'جستجو بین کارمندان...';
+const noAssigneeSearchResult = 'کارمندی پیدا نشد';
+const projectSearchPlaceholder = 'جستجو بین پروژه‌ها...';
+const noProjectSearchResult = 'پروژه‌ای پیدا نشد';
+
+function filterIssueAssigneeUsers(users: TaskaraUser[], query: string) {
+   const normalizedQuery = query.trim().toLocaleLowerCase('fa');
+   if (!normalizedQuery) return users;
+   return users.filter((user) =>
+      [user.name, user.email, user.mattermostUsername || '']
+         .join(' ')
+         .toLocaleLowerCase('fa')
+         .includes(normalizedQuery)
+   );
+}
+
+function filterIssueProjects(projects: IssueProjectOption[], query: string) {
+   const normalizedQuery = query.trim().toLocaleLowerCase('fa');
+   if (!normalizedQuery) return projects;
+   return projects.filter((project) =>
+      [project.name, project.keyPrefix, project.team?.name || '']
+         .join(' ')
+         .toLocaleLowerCase('fa')
+         .includes(normalizedQuery)
+   );
+}
 
 function getIssueReturnPath(state: unknown): string | null {
    if (!state || typeof state !== 'object' || !('from' in state)) return null;
@@ -142,6 +171,25 @@ function applyIssuePatch(
    }
 
    return next;
+}
+
+function isSameIssueTask(left: TaskaraTask, right: TaskaraTask) {
+   return left.id === right.id || Boolean(left.key && right.key && left.key === right.key);
+}
+
+function mergeIssueDetailTask(current: TaskaraTask | null, incoming: TaskaraTask): TaskaraTask {
+   if (!current || !isSameIssueTask(current, incoming)) return incoming;
+
+   return {
+      ...current,
+      ...incoming,
+      attachments: incoming.attachments ?? current.attachments,
+      blockedTasks: incoming.blockedTasks ?? current.blockedTasks,
+      blockingDependencies: incoming.blockingDependencies ?? current.blockingDependencies,
+      comments: incoming.comments ?? current.comments,
+      labels: incoming.labels ?? current.labels,
+      subtasks: incoming.subtasks ?? current.subtasks,
+   };
 }
 
 export function IssuePage() {
@@ -224,7 +272,7 @@ export function IssuePage() {
    useEffect(() => {
       cachedTaskRef.current = cachedTask;
       if (!cachedTask) return;
-      setTask(cachedTask);
+      setTask((current) => mergeIssueDetailTask(current, cachedTask));
       if (!titleFocusedRef.current) setTitleDraft(cachedTask.title);
       if (!descriptionFocusedRef.current) setDescriptionDraft(cachedTask.description || '');
       setAiSuggestion(null);
@@ -262,7 +310,7 @@ export function IssuePage() {
       const cachedTask = cachedTaskRef.current;
       const syncUsers = syncUsersRef.current;
       if (cachedTask) {
-         setTask(cachedTask);
+         setTask((current) => mergeIssueDetailTask(current, cachedTask));
          if (!titleFocusedRef.current) setTitleDraft(cachedTask.title);
          if (!descriptionFocusedRef.current) setDescriptionDraft(cachedTask.description || '');
          if (syncUsers.length) setUsers(syncUsers);
@@ -1009,101 +1057,23 @@ export function IssuePage() {
 
             <SidebarSection title={fa.issue.properties}>
                <div className="grid gap-1 p-2 text-sm">
-                  <Select value={task.status} onValueChange={(status) => void updateTask({ status })}>
-                     <SidebarSelectRow
-                        icon={<StatusIcon status={task.status} className="size-5" />}
-                        label={linearStatusMeta[task.status]?.label || task.status}
-                     >
-                        <SelectTrigger aria-label={fa.issue.status} className="absolute inset-0 h-full w-full cursor-pointer opacity-0">
-                           <SelectValue />
-                        </SelectTrigger>
-                     </SidebarSelectRow>
-                     <SelectContent className="rounded-xl border-white/10 bg-[#202023] text-zinc-100">
-                        {taskStatuses.map((status) => (
-                           <SelectItem key={status} value={status}>
-                              {linearStatusMeta[status]?.label || status}
-                           </SelectItem>
-                        ))}
-                     </SelectContent>
-                  </Select>
-                  <Select value={task.priority} onValueChange={(priority) => void updateTask({ priority })}>
-                     <SidebarSelectRow
-                        muted={task.priority === 'NO_PRIORITY'}
-                        icon={<PriorityIcon priority={task.priority} className="size-5" />}
-                        label={
-                           task.priority === 'NO_PRIORITY'
-                              ? fa.issue.priority
-                              : linearPriorityMeta[task.priority]?.label || task.priority
-                        }
-                     >
-                        <SelectTrigger aria-label={fa.issue.priority} className="absolute inset-0 h-full w-full cursor-pointer opacity-0">
-                           <SelectValue />
-                        </SelectTrigger>
-                     </SidebarSelectRow>
-                     <SelectContent className="rounded-xl border-white/10 bg-[#202023] text-zinc-100">
-                        {taskPriorities.map((priority) => (
-                           <SelectItem key={priority} value={priority}>
-                              {linearPriorityMeta[priority]?.label || priority}
-                           </SelectItem>
-                        ))}
-                     </SelectContent>
-                  </Select>
-                  <Select
-                     value={toSelectValue(task.assignee?.id)}
-                     onValueChange={(assigneeId) => void updateTask({ assigneeId: fromSelectValueNullable(assigneeId) })}
-                  >
-                     <SidebarSelectRow
-                        muted={!task.assignee}
-                        icon={
-                           task.assignee ? (
-                              <LinearAvatar name={task.assignee.name} src={task.assignee.avatarUrl} className="size-5" />
-                           ) : (
-                              <NoAssigneeIcon className="size-5 text-zinc-500" />
-                           )
-                        }
-                        label={task.assignee?.name || fa.issue.assignee}
-                     >
-                        <SelectTrigger aria-label={fa.issue.assignee} className="absolute inset-0 h-full w-full cursor-pointer opacity-0">
-                           <SelectValue />
-                        </SelectTrigger>
-                     </SidebarSelectRow>
-                     <SelectContent className="rounded-xl border-white/10 bg-[#202023] text-zinc-100">
-                        <SelectItem value={EMPTY_SELECT_VALUE}>{fa.app.unset}</SelectItem>
-                        {users.map((user) => (
-                           <SelectItem key={user.id} value={user.id}>
-                              {user.name}
-                           </SelectItem>
-                        ))}
-                     </SelectContent>
-                  </Select>
-                  <Select
-                     value={task.weight === null || task.weight === undefined ? EMPTY_SELECT_VALUE : String(task.weight)}
-                     onValueChange={(weight) =>
-                        void updateTask({ weight: weight === EMPTY_SELECT_VALUE ? null : Number(weight) })
-                     }
-                  >
-                     <SidebarSelectRow
-                        muted={task.weight === null || task.weight === undefined}
-                        icon={<Box className="size-5 text-zinc-500" />}
-                        label={
-                           task.weight === null || task.weight === undefined
-                              ? 'بدون وزن'
-                              : task.weight.toLocaleString('fa-IR')
-                        }
-                     >
-                        <SelectTrigger aria-label={fa.issue.weight} className="absolute inset-0 h-full w-full cursor-pointer opacity-0">
-                           <SelectValue />
-                        </SelectTrigger>
-                     </SidebarSelectRow>
-                     <SelectContent className="rounded-xl border-white/10 bg-[#202023] text-zinc-100">
-                        <SelectItem value={EMPTY_SELECT_VALUE}>بدون وزن</SelectItem>
-                        {taskWeights.map((item) => (
-                           <SelectItem key={item} value={String(item)}>
-                              {item.toLocaleString('fa-IR')}
-                           </SelectItem>
-                        ))}
-                     </SelectContent>
-                  </Select>
+                  <IssueSidebarStatusPicker
+                     status={task.status}
+                     onChange={(status) => void updateTask({ status })}
+                  />
+                  <IssueSidebarPriorityPicker
+                     priority={task.priority}
+                     onChange={(priority) => void updateTask({ priority })}
+                  />
+                  <IssueSidebarAssigneePicker
+                     assignee={task.assignee}
+                     users={users}
+                     onChange={(assigneeId) => void updateTask({ assigneeId })}
+                  />
+                  <IssueSidebarWeightPicker
+                     weight={task.weight}
+                     onChange={(weight) => void updateTask({ weight })}
+                  />
                   <TaskDueDateControl
                      className="h-auto min-h-9 w-full gap-3 rounded-lg px-2 py-2 text-sm"
                      dueAt={task.dueAt || null}
@@ -1164,42 +1134,15 @@ export function IssuePage() {
 
             <SidebarSection title={fa.issue.project} className="mt-3">
                <div className="grid gap-1 p-2 text-sm">
-                  <Select
+                  <IssueSidebarProjectPicker
                      disabled={!projectOptions.length}
-                     value={toSelectValue(task.project?.id)}
-                     onValueChange={(value) => {
-                        const projectId = fromSelectValue(value);
-                        if (!projectId || projectId === task.project?.id) return;
+                     project={task.project}
+                     projects={projectOptions}
+                     onChange={(projectId) => {
+                        if (projectId === task.project?.id) return;
                         void updateTask({ projectId });
                      }}
-                  >
-                     <SidebarSelectRow
-                        muted={!task.project}
-                        icon={
-                           task.project ? (
-                              <ProjectGlyph name={task.project.name} className="size-5 rounded-sm" iconClassName="size-3.5" />
-                           ) : (
-                              <Box className="size-5 text-zinc-500" />
-                           )
-                        }
-                        label={task.project?.name || fa.issue.project}
-                     >
-                        <SelectTrigger
-                           aria-label={fa.issue.project}
-                           className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
-                        >
-                           <SelectValue />
-                        </SelectTrigger>
-                     </SidebarSelectRow>
-                     <SelectContent className="rounded-xl border-white/10 bg-[#202023] text-zinc-100">
-                        {!task.project ? <SelectItem value={EMPTY_SELECT_VALUE}>{fa.app.unset}</SelectItem> : null}
-                        {projectOptions.map((project) => (
-                           <SelectItem key={project.id} value={project.id}>
-                              {project.name}
-                           </SelectItem>
-                        ))}
-                     </SelectContent>
-                  </Select>
+                  />
                </div>
             </SidebarSection>
          </aside>
@@ -1722,6 +1665,370 @@ function SidebarSection({
          </div>
          {children}
       </section>
+   );
+}
+
+function IssueSidebarStatusPicker({
+   status,
+   onChange,
+}: {
+   status: string;
+   onChange: (status: string) => void;
+}) {
+   const [open, setOpen] = useState(false);
+   const handleChange = (nextStatus: string) => {
+      onChange(nextStatus);
+      setOpen(false);
+   };
+
+   return (
+      <Popover open={open} onOpenChange={setOpen}>
+         <PopoverTrigger asChild>
+            <SidebarPickerTrigger
+               ariaLabel={fa.issue.status}
+               icon={<StatusIcon status={status} className="size-5" />}
+               label={linearStatusMeta[status]?.label || status}
+               open={open}
+            />
+         </PopoverTrigger>
+         <SidebarPickerContent className="w-72">
+            {taskStatuses.map((item) => (
+               <SidebarPickerOption
+                  key={item}
+                  active={status === item}
+                  icon={<StatusIcon status={item} className="size-4" />}
+                  label={linearStatusMeta[item]?.label || item}
+                  onClick={() => handleChange(item)}
+               />
+            ))}
+         </SidebarPickerContent>
+      </Popover>
+   );
+}
+
+function IssueSidebarPriorityPicker({
+   priority,
+   onChange,
+}: {
+   priority: string;
+   onChange: (priority: string) => void;
+}) {
+   const [open, setOpen] = useState(false);
+   const handleChange = (nextPriority: string) => {
+      onChange(nextPriority);
+      setOpen(false);
+   };
+
+   return (
+      <Popover open={open} onOpenChange={setOpen}>
+         <PopoverTrigger asChild>
+            <SidebarPickerTrigger
+               ariaLabel={fa.issue.priority}
+               muted={priority === 'NO_PRIORITY'}
+               icon={<PriorityIcon priority={priority} className="size-5" />}
+               label={
+                  priority === 'NO_PRIORITY'
+                     ? fa.issue.priority
+                     : linearPriorityMeta[priority]?.label || priority
+               }
+               open={open}
+            />
+         </PopoverTrigger>
+         <SidebarPickerContent className="w-72">
+            {taskPriorities.map((item) => (
+               <SidebarPickerOption
+                  key={item}
+                  active={priority === item}
+                  icon={<PriorityIcon priority={item} className="size-4" />}
+                  label={linearPriorityMeta[item]?.label || item}
+                  onClick={() => handleChange(item)}
+               />
+            ))}
+         </SidebarPickerContent>
+      </Popover>
+   );
+}
+
+function IssueSidebarWeightPicker({
+   weight,
+   onChange,
+}: {
+   weight?: number | null;
+   onChange: (weight: number | null) => void;
+}) {
+   const [open, setOpen] = useState(false);
+   const handleChange = (nextWeight: number | null) => {
+      onChange(nextWeight);
+      setOpen(false);
+   };
+   const unset = weight === null || weight === undefined;
+
+   return (
+      <Popover open={open} onOpenChange={setOpen}>
+         <PopoverTrigger asChild>
+            <SidebarPickerTrigger
+               ariaLabel={fa.issue.weight}
+               muted={unset}
+               icon={<Box className="size-5 text-zinc-500" />}
+               label={unset ? 'بدون وزن' : weight.toLocaleString('fa-IR')}
+               open={open}
+            />
+         </PopoverTrigger>
+         <SidebarPickerContent className="w-56">
+            <SidebarPickerOption
+               active={unset}
+               icon={<Box className="size-4 text-zinc-500" />}
+               label="بدون وزن"
+               onClick={() => handleChange(null)}
+            />
+            {taskWeights.map((item) => (
+               <SidebarPickerOption
+                  key={item}
+                  active={weight === item}
+                  icon={<Box className="size-4 text-zinc-400" />}
+                  label={item.toLocaleString('fa-IR')}
+                  onClick={() => handleChange(item)}
+               />
+            ))}
+         </SidebarPickerContent>
+      </Popover>
+   );
+}
+
+function IssueSidebarAssigneePicker({
+   assignee,
+   users,
+   onChange,
+}: {
+   assignee: TaskaraTask['assignee'];
+   users: TaskaraUser[];
+   onChange: (assigneeId: string | null) => void;
+}) {
+   const [open, setOpen] = useState(false);
+   const [query, setQuery] = useState('');
+   const filteredUsers = useMemo(() => filterIssueAssigneeUsers(users, query), [query, users]);
+
+   const handleChange = (assigneeId: string | null) => {
+      onChange(assigneeId);
+      setOpen(false);
+   };
+
+   return (
+      <Popover open={open} onOpenChange={setOpen}>
+         <PopoverTrigger asChild>
+            <SidebarPickerTrigger
+               ariaLabel={fa.issue.assignee}
+               muted={!assignee}
+               icon={
+                  assignee ? (
+                     <LinearAvatar name={assignee.name} src={assignee.avatarUrl} className="size-5" />
+                  ) : (
+                     <NoAssigneeIcon className="size-5 text-zinc-500" />
+                  )
+               }
+               label={assignee?.name || fa.issue.assignee}
+               open={open}
+            />
+         </PopoverTrigger>
+         <SidebarPickerContent className="w-80">
+            <PickerSearchField
+               value={query}
+               onChange={setQuery}
+               placeholder={assigneeSearchPlaceholder}
+            />
+            <div className="max-h-72 overflow-y-auto overscroll-contain pe-1">
+               <SidebarPickerOption
+                  active={!assignee?.id}
+                  icon={<NoAssigneeIcon className="size-4 text-zinc-500" />}
+                  label={fa.issue.noAssignee}
+                  onClick={() => handleChange(null)}
+               />
+               {filteredUsers.length ? (
+                  filteredUsers.map((user) => (
+                     <SidebarPickerOption
+                        key={user.id}
+                        active={assignee?.id === user.id}
+                        icon={<LinearAvatar name={user.name} src={user.avatarUrl} className="size-5" />}
+                        label={user.name}
+                        onClick={() => handleChange(user.id)}
+                     />
+                  ))
+               ) : (
+                  <div className="px-3 py-2 text-xs text-zinc-500">{noAssigneeSearchResult}</div>
+               )}
+            </div>
+         </SidebarPickerContent>
+      </Popover>
+   );
+}
+
+function IssueSidebarProjectPicker({
+   disabled,
+   project,
+   projects,
+   onChange,
+}: {
+   disabled?: boolean;
+   project: TaskaraTask['project'];
+   projects: IssueProjectOption[];
+   onChange: (projectId: string) => void;
+}) {
+   const [open, setOpen] = useState(false);
+   const [query, setQuery] = useState('');
+   const filteredProjects = useMemo(() => filterIssueProjects(projects, query), [projects, query]);
+
+   const handleChange = (projectId: string) => {
+      onChange(projectId);
+      setOpen(false);
+   };
+
+   return (
+      <Popover open={open} onOpenChange={setOpen}>
+         <PopoverTrigger asChild>
+            <SidebarPickerTrigger
+               ariaLabel={fa.issue.project}
+               disabled={disabled}
+               muted={!project}
+               icon={
+                  project ? (
+                     <ProjectGlyph name={project.name} className="size-5 rounded-sm" iconClassName="size-3.5" />
+                  ) : (
+                     <Box className="size-5 text-zinc-500" />
+                  )
+               }
+               label={project?.name || fa.issue.project}
+               open={open}
+            />
+         </PopoverTrigger>
+         <SidebarPickerContent className="w-80">
+            <PickerSearchField
+               value={query}
+               onChange={setQuery}
+               placeholder={projectSearchPlaceholder}
+            />
+            <div className="max-h-72 overflow-y-auto overscroll-contain pe-1">
+               {filteredProjects.length ? (
+                  filteredProjects.map((item) => (
+                     <SidebarPickerOption
+                        key={item.id}
+                        active={project?.id === item.id}
+                        icon={
+                           <ProjectGlyph
+                              name={item.name}
+                              className="size-4 rounded-sm"
+                              iconClassName="size-3"
+                           />
+                        }
+                        label={item.name}
+                        onClick={() => handleChange(item.id)}
+                     />
+                  ))
+               ) : (
+                  <div className="px-3 py-2 text-xs text-zinc-500">{noProjectSearchResult}</div>
+               )}
+            </div>
+         </SidebarPickerContent>
+      </Popover>
+   );
+}
+
+function SidebarPickerTrigger({
+   ariaLabel,
+   disabled = false,
+   icon,
+   label,
+   muted = false,
+   open,
+}: {
+   ariaLabel: string;
+   disabled?: boolean;
+   icon: React.ReactNode;
+   label: string;
+   muted?: boolean;
+   open: boolean;
+}) {
+   return (
+      <button
+         aria-expanded={open}
+         aria-label={ariaLabel}
+         className="flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg px-2 py-2 text-start transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-60"
+         disabled={disabled}
+         role="combobox"
+         type="button"
+      >
+         <span className="flex size-5 shrink-0 items-center justify-center">{icon}</span>
+         <span className={cn('min-w-0 flex-1 truncate text-base', muted ? 'text-zinc-500' : 'text-zinc-100')}>
+            {label}
+         </span>
+      </button>
+   );
+}
+
+function SidebarPickerContent({
+   children,
+   className,
+}: {
+   children: React.ReactNode;
+   className?: string;
+}) {
+   return (
+      <PopoverContent
+         align="start"
+         className={cn(
+            'rounded-xl border-white/10 bg-[#202023] p-1 text-zinc-100 shadow-2xl',
+            className
+         )}
+      >
+         {children}
+      </PopoverContent>
+   );
+}
+
+function SidebarPickerOption({
+   active,
+   icon,
+   label,
+   onClick,
+}: {
+   active: boolean;
+   icon: React.ReactNode;
+   label: string;
+   onClick: () => void;
+}) {
+   return (
+      <button
+         className="flex h-10 w-full items-center gap-3 rounded-lg px-3 text-sm text-zinc-300 outline-none transition hover:bg-white/[0.06] focus:bg-white/[0.08]"
+         type="button"
+         onClick={onClick}
+      >
+         <span className="flex size-5 shrink-0 items-center justify-center">{icon}</span>
+         <span className="min-w-0 flex-1 truncate text-start">{label}</span>
+         {active ? <Check className="size-4 shrink-0 text-zinc-400" /> : null}
+      </button>
+   );
+}
+
+function PickerSearchField({
+   value,
+   onChange,
+   placeholder,
+}: {
+   value: string;
+   onChange: (value: string) => void;
+   placeholder: string;
+}) {
+   return (
+      <div className="border-b border-white/8 p-2">
+         <label className="relative block">
+            <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-zinc-500" />
+            <Input
+               value={value}
+               onChange={(event) => onChange(event.target.value)}
+               placeholder={placeholder}
+               className="h-8 rounded-md border-white/10 bg-[#1b1b1d] pr-3 pl-8 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:ring-indigo-400/40"
+            />
+         </label>
+      </div>
    );
 }
 

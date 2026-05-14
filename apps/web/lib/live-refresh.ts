@@ -30,11 +30,11 @@ export function useLiveRefresh(onRefresh: () => void | Promise<void>, options: L
       fireOnMount = true,
       intervalMs = 60000,
       minIntervalMs = 1500,
-      refreshOnFocus = true,
+      refreshOnFocus = false,
       refreshOnInterval = true,
       refreshOnOnline = true,
       refreshOnPageShow = true,
-      refreshOnVisibility = true,
+      refreshOnVisibility = false,
       refreshOnWorkspaceEvent = true,
    } = options;
    const onRefreshRef = useRef(onRefresh);
@@ -81,7 +81,9 @@ export function useLiveRefresh(onRefresh: () => void | Promise<void>, options: L
          if (document.visibilityState === 'hidden') return;
          requestRefresh(true);
       };
-      const handlePageShow = () => requestRefresh(true);
+      const handlePageShow = (event: PageTransitionEvent) => {
+         if (event.persisted) requestRefresh(true);
+      };
 
       if (fireOnMount) requestRefresh(true);
       const interval = refreshOnInterval ? window.setInterval(handleWake, intervalMs) : null;

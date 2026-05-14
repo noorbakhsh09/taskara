@@ -37,17 +37,14 @@ import { DescriptionEditor } from '@/components/taskara/description-editor';
 import { LinearAvatar } from '@/components/taskara/linear-ui';
 import { fa } from '@/lib/fa-copy';
 import { formatJalaliDateTime } from '@/lib/jalali';
-import { dispatchWorkspaceRefresh, useLiveRefresh } from '@/lib/live-refresh';
+import { dispatchWorkspaceRefresh } from '@/lib/live-refresh';
+import { useWorkspaceKnowledgeSync } from '@/lib/knowledge-sync';
 import { taskaraRequest, uploadKnowledgePageAttachment } from '@/lib/taskara-client';
 import type {
-   PaginatedResponse,
    TaskaraKnowledgeComment,
    TaskaraKnowledgePage,
    TaskaraKnowledgePageVersion,
    TaskaraKnowledgeSpace,
-   TaskaraProject,
-   TaskaraTeam,
-   TaskaraUser,
 } from '@/lib/taskara-types';
 import { cn } from '@/lib/utils';
 import { EMPTY_SELECT_VALUE, fromSelectValue, toSelectValue } from '@/lib/select-utils';
@@ -89,19 +86,29 @@ export function KnowledgeView() {
    const navigate = useNavigate();
    const { orgId, spaceKey, pageId } = useParams();
    const workspaceSlug = orgId || 'taskara';
-   const [spaces, setSpaces] = useState<TaskaraKnowledgeSpace[]>([]);
-   const [pages, setPages] = useState<TaskaraKnowledgePage[]>([]);
-   const [teams, setTeams] = useState<TaskaraTeam[]>([]);
-   const [projects, setProjects] = useState<TaskaraProject[]>([]);
-   const [users, setUsers] = useState<TaskaraUser[]>([]);
+   const knowledgeSync = useWorkspaceKnowledgeSync();
+   const {
+      commentsByPageId,
+      detailsLoadingByPageId,
+      loadPageDetails,
+      loadPages,
+      loading,
+      pagesBySpaceId,
+      pagesLoadingBySpaceId,
+      pageDetailsById,
+      projects,
+      setCommentsForPage,
+      setPage,
+      setPagesForSpace,
+      setSpaces,
+      spaces,
+      teams,
+      users,
+   } = knowledgeSync;
    const [selectedPage, setSelectedPage] = useState<TaskaraKnowledgePage | null>(null);
    const [comments, setComments] = useState<TaskaraKnowledgeComment[]>([]);
    const [versions, setVersions] = useState<TaskaraKnowledgePageVersion[]>([]);
    const [expandedPageIds, setExpandedPageIds] = useState<string[]>([]);
-   const [loading, setLoading] = useState(true);
-   const [pagesLoading, setPagesLoading] = useState(false);
-   const [detailsLoading, setDetailsLoading] = useState(false);
-   const [error, setError] = useState('');
    const [spaceDialogOpen, setSpaceDialogOpen] = useState(false);
    const [pageDialogOpen, setPageDialogOpen] = useState(false);
    const [historyDialogOpen, setHistoryDialogOpen] = useState(false);
@@ -126,6 +133,15 @@ export function KnowledgeView() {
       if (spaceKey) return spaces.find((space) => space.key === spaceKey || space.id === spaceKey) || null;
       return spaces[0] || null;
    }, [spaceKey, spaces]);
+
+   const pages = selectedSpace ? pagesBySpaceId[selectedSpace.id] || [] : [];
+   const pagesLoading = selectedSpace ? Boolean(pagesLoadingBySpaceId[selectedSpace.id]) : false;
+   const detailsLoading = pageId ? Boolean(detailsLoadingByPageId[pageId]) : false;
+   const visibleError = knowledgeSync.error;
+   const pagesRef = useRef<TaskaraKnowledgePage[]>([]);
+   const pageDetailsByIdRef = useRef<Record<string, TaskaraKnowledgePage>>({});
+   const commentsByPageIdRef = useRef<Record<string, TaskaraKnowledgeComment[]>>({});
+   const hasUnsavedPageChangesRef = useRef(false);
 
    const sortedPages = useMemo(
       () => [...pages].sort((a, b) => a.path.localeCompare(b.path, 'fa')),
@@ -154,85 +170,27 @@ export function KnowledgeView() {
       [contentDraft, labelsDraft, selectedPage, titleDraft]
    );
 
-   const loadSpaces = useCallback(async () => {
-      setError('');
-      try {
-         const [spaceResult, userResult, teamResult, projectResult] = await Promise.all([
-            taskaraRequest<TaskaraKnowledgeSpace[]>('/knowledge/spaces'),
-            taskaraRequest<PaginatedResponse<TaskaraUser>>('/users?limit=200').catch(() => ({
-               items: [],
-               total: 0,
-               limit: 0,
-               offset: 0,
-            })),
-            taskaraRequest<TaskaraTeam[]>('/teams').catch(() => []),
-            taskaraRequest<TaskaraProject[]>('/projects').catch(() => []),
-         ]);
-         setSpaces(spaceResult);
-         setUsers(userResult.items);
-         setTeams(teamResult);
-         setProjects(projectResult);
-         if (!spaceKey && spaceResult[0]) {
-            navigate(`/${workspaceSlug}/wiki/${spaceResult[0].key}`, { replace: true });
-         }
-      } catch (err) {
-         setError(err instanceof Error ? err.message : fa.knowledge.loadFailed);
-      } finally {
-         setLoading(false);
-      }
-   }, [navigate, spaceKey, workspaceSlug]);
-
-   const loadPages = useCallback(async (space: TaskaraKnowledgeSpace) => {
-      setPagesLoading(true);
-      try {
-         const params = new URLSearchParams({ spaceId: space.id, limit: '200' });
-         const result = await taskaraRequest<PaginatedResponse<TaskaraKnowledgePage>>(
-            `/knowledge/pages?${params.toString()}`
-         );
-         setPages(result.items);
-         return result.items;
-      } catch (err) {
-         setError(err instanceof Error ? err.message : fa.knowledge.loadFailed);
-         return [];
-      } finally {
-         setPagesLoading(false);
-      }
-   }, []);
-
-   const loadSelectedPage = useCallback(async (id: string) => {
-      setDetailsLoading(true);
-      try {
-         const [pageResult, commentsResult] = await Promise.all([
-            taskaraRequest<TaskaraKnowledgePage>(`/knowledge/pages/${encodeURIComponent(id)}`),
-            taskaraRequest<TaskaraKnowledgeComment[]>(`/knowledge/pages/${encodeURIComponent(id)}/comments`).catch(() => []),
-         ]);
-         setSelectedPage(pageResult);
-         setComments(commentsResult);
-         setTitleDraft(pageResult.title);
-         setContentDraft(editorValueFromContent(pageResult.content));
-         setLabelsDraft((pageResult.labels || []).map((item) => item.label.name).join(', '));
-      } catch (err) {
-         setError(err instanceof Error ? err.message : fa.knowledge.loadFailed);
-      } finally {
-         setDetailsLoading(false);
-      }
-   }, []);
+   useEffect(() => {
+      pagesRef.current = pages;
+   }, [pages]);
 
    useEffect(() => {
-      void loadSpaces();
-   }, [loadSpaces]);
+      pageDetailsByIdRef.current = pageDetailsById;
+   }, [pageDetailsById]);
 
-   useLiveRefresh(() => {
-      void loadSpaces();
-      if (selectedSpace) void loadPages(selectedSpace);
-      if (pageId && !hasUnsavedPageChanges) void loadSelectedPage(pageId);
-   }, {
-      fireOnMount: false,
-      refreshOnFocus: false,
-      refreshOnInterval: false,
-      refreshOnPageShow: false,
-      refreshOnVisibility: false,
-   });
+   useEffect(() => {
+      commentsByPageIdRef.current = commentsByPageId;
+   }, [commentsByPageId]);
+
+   useEffect(() => {
+      hasUnsavedPageChangesRef.current = hasUnsavedPageChanges;
+   }, [hasUnsavedPageChanges]);
+
+   useEffect(() => {
+      if (!spaceKey && spaces[0]) {
+         navigate(`/${workspaceSlug}/wiki/${spaces[0].key}`, { replace: true });
+      }
+   }, [navigate, spaceKey, spaces, workspaceSlug]);
 
    useEffect(() => {
       if (!selectedSpace) return;
@@ -266,8 +224,28 @@ export function KnowledgeView() {
          setComments([]);
          return;
       }
-      void loadSelectedPage(pageId);
-   }, [loadSelectedPage, pageId]);
+      const cachedPage = pageDetailsByIdRef.current[pageId] || pagesRef.current.find((page) => page.id === pageId);
+      if (cachedPage && selectedPage?.id !== pageId) {
+         hydrateSelectedPage(cachedPage, commentsByPageIdRef.current[pageId] || []);
+      }
+      void loadPageDetails(pageId).then((page) => {
+         if (!page) return;
+         setSelectedPage((current) => {
+            if (current?.id === page.id && hasUnsavedPageChangesRef.current) return current;
+            setTitleDraft(page.title);
+            setContentDraft(editorValueFromContent(page.content));
+            setLabelsDraft((page.labels || []).map((item) => item.label.name).join(', '));
+            setComments(commentsByPageIdRef.current[page.id] || []);
+            return page;
+         });
+      });
+   }, [loadPageDetails, pageId, selectedPage?.id]);
+
+   useEffect(() => {
+      if (!pageId || selectedPage?.id !== pageId) return;
+      const cachedComments = commentsByPageId[pageId];
+      if (cachedComments) setComments(cachedComments);
+   }, [commentsByPageId, pageId, selectedPage?.id]);
 
    function selectSpace(value: string) {
       if (value === createSpaceSelectValue) {
@@ -277,6 +255,14 @@ export function KnowledgeView() {
 
       const nextSpace = spaces.find((space) => space.id === value);
       if (nextSpace) navigate(`/${workspaceSlug}/wiki/${nextSpace.key}`);
+   }
+
+   function hydrateSelectedPage(page: TaskaraKnowledgePage, pageComments: TaskaraKnowledgeComment[] = []) {
+      setSelectedPage(page);
+      setComments(pageComments);
+      setTitleDraft(page.title);
+      setContentDraft(editorValueFromContent(page.content));
+      setLabelsDraft((page.labels || []).map((item) => item.label.name).join(', '));
    }
 
    function togglePageExpanded(pageIdToToggle: string) {
@@ -312,7 +298,7 @@ export function KnowledgeView() {
          });
          setSpaceDialogOpen(false);
          setSpaceForm(emptySpaceForm);
-         await loadSpaces();
+         setSpaces([created, ...spaces.filter((space) => space.id !== created.id)]);
          navigate(`/${workspaceSlug}/wiki/${created.key}`);
          dispatchWorkspaceRefresh({ source: 'knowledge:space:create' });
       } catch (err) {
@@ -370,7 +356,8 @@ export function KnowledgeView() {
          });
          setPageDialogOpen(false);
          setPageForm(emptyPageForm);
-         await loadPages(selectedSpace);
+         setPage(created);
+         void loadPages(selectedSpace, { force: true });
          navigate(`/${workspaceSlug}/wiki/${selectedSpace.key}/${created.id}`);
          dispatchWorkspaceRefresh({ source: 'knowledge:page:create' });
       } catch (err) {
@@ -412,7 +399,7 @@ export function KnowledgeView() {
             }
          );
          setSelectedPage(updated);
-         setPages((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+         setPage(updated);
          setLabelsDraft((updated.labels || []).map((item) => item.label.name).join(', '));
          if (!silent) toast.success(fa.knowledge.saved);
          dispatchWorkspaceRefresh({ source: 'knowledge:page:update' });
@@ -441,9 +428,11 @@ export function KnowledgeView() {
       try {
          await taskaraRequest(`/knowledge/pages/${encodeURIComponent(selectedPage.id)}`, { method: 'DELETE' });
          toast.success(fa.knowledge.archived);
-         const remaining = await loadPages(selectedSpace);
+         const remaining = pages.filter((page) => page.id !== selectedPage.id);
+         setPagesForSpace(selectedSpace.id, remaining);
          const nextPage = remaining.find((page) => page.id !== selectedPage.id);
          navigate(nextPage ? `/${workspaceSlug}/wiki/${selectedSpace.key}/${nextPage.id}` : `/${workspaceSlug}/wiki/${selectedSpace.key}`);
+         void loadPages(selectedSpace, { force: true });
          dispatchWorkspaceRefresh({ source: 'knowledge:page:archive' });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.knowledge.updateFailed);
@@ -462,7 +451,7 @@ export function KnowledgeView() {
             }
          );
          setSelectedPage(updated);
-         setPages((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+         setPage(updated);
          toast.success(fa.knowledge.verificationUpdated);
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.knowledge.updateFailed);
@@ -483,7 +472,9 @@ export function KnowledgeView() {
                body: JSON.stringify({ body: commentBody.trim() }),
             }
          );
-         setComments((items) => [...items, comment]);
+         const nextComments = [...comments, comment];
+         setComments(nextComments);
+         setCommentsForPage(selectedPage.id, nextComments);
          setCommentBody('');
          toast.success(fa.knowledge.commentCreated);
       } catch (err) {
@@ -517,6 +508,7 @@ export function KnowledgeView() {
             { method: 'POST' }
          );
          setSelectedPage(updated);
+         setPage(updated);
          setTitleDraft(updated.title);
          setContentDraft(editorValueFromContent(updated.content));
          toast.success(fa.knowledge.reverted);
@@ -597,7 +589,7 @@ export function KnowledgeView() {
                )}
             </div>
 
-            {error ? <div className="m-3 rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-2 text-xs leading-5 text-red-200">{error}</div> : null}
+            {visibleError ? <div className="m-3 rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-2 text-xs leading-5 text-red-200">{visibleError}</div> : null}
 
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
                {loading ? (

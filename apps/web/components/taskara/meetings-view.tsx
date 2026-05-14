@@ -38,6 +38,17 @@ const emptyMeetingForm = {
    scheduledAt: '',
 };
 
+function mergeMeetingDetail(current: TaskaraMeeting | null, incoming: TaskaraMeeting): TaskaraMeeting {
+   if (!current || current.id !== incoming.id) return incoming;
+
+   return {
+      ...current,
+      ...incoming,
+      participants: incoming.participants ?? current.participants,
+      tasks: incoming.tasks ?? current.tasks,
+   };
+}
+
 export function MeetingsView() {
    const navigate = useNavigate();
    const { orgId, meetingId } = useParams();
@@ -76,7 +87,7 @@ export function MeetingsView() {
 
    useEffect(() => {
       const next = meetings.find((item) => item.id === meetingId) || meetings[0] || null;
-      setSelected(next);
+      setSelected((current) => (next ? mergeMeetingDetail(current, next) : null));
       if (!meetingId && next && orgId) {
          navigate(`/${orgId}/meetings/${next.id}`, { replace: true });
       }
@@ -301,7 +312,7 @@ export function MeetingsView() {
             <DialogContent
                aria-label={fa.meeting.newMeeting}
                showCloseButton={false}
-               className="top-[35%] flex max-h-[calc(100svh-32px)] max-w-[760px] flex-col gap-0 overflow-visible rounded-[18px] border-white/10 bg-[#1d1d20] p-0 text-zinc-100 shadow-[0_18px_70px_rgb(0_0_0/0.55)] sm:max-w-[760px]"
+               className="flex max-h-[calc(100svh-32px)] max-w-[760px] flex-col gap-0 overflow-visible rounded-[18px] border-white/10 bg-[#1d1d20] p-0 text-zinc-100 shadow-[0_18px_70px_rgb(0_0_0/0.55)] sm:max-w-[760px]"
             >
                <DialogHeader className="relative px-5 pt-4 pb-0 text-right">
                   <div className="absolute top-4 end-4 flex items-center gap-2">

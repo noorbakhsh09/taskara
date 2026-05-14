@@ -59,6 +59,21 @@ function createEmptyForm(): AnnouncementForm {
    };
 }
 
+function mergeAnnouncementDetail(
+   current: TaskaraAnnouncement | null,
+   incoming: TaskaraAnnouncement
+): TaskaraAnnouncement {
+   if (!current || current.id !== incoming.id) return incoming;
+
+   return {
+      ...current,
+      ...incoming,
+      poll: 'poll' in incoming ? incoming.poll : current.poll,
+      pollVoteOptionIds: incoming.pollVoteOptionIds ?? current.pollVoteOptionIds,
+      recipients: incoming.recipients ?? current.recipients,
+   };
+}
+
 export function AnnouncementsView() {
    const navigate = useNavigate();
    const { orgId, announcementId } = useParams();
@@ -107,7 +122,7 @@ export function AnnouncementsView() {
 
    useEffect(() => {
       const next = announcements.find((item) => item.id === announcementId) || announcements[0] || null;
-      setSelected(next);
+      setSelected((current) => (next ? mergeAnnouncementDetail(current, next) : null));
       if (!announcementId && next && orgId) {
          navigate(`/${orgId}/announcements/${next.id}`, { replace: true });
       }
@@ -520,7 +535,7 @@ export function AnnouncementsView() {
             <DialogContent
                aria-label={fa.announcement.newAnnouncement}
                showCloseButton={false}
-               className="top-[35%] flex max-h-[calc(100svh-32px)] max-w-[760px] flex-col gap-0 overflow-hidden rounded-[18px] border-white/10 bg-[#1d1d20] p-0 text-zinc-100 shadow-[0_18px_70px_rgb(0_0_0/0.55)] sm:max-w-[760px]"
+               className="flex max-h-[calc(100svh-32px)] max-w-[760px] flex-col gap-0 overflow-hidden rounded-[18px] border-white/10 bg-[#1d1d20] p-0 text-zinc-100 shadow-[0_18px_70px_rgb(0_0_0/0.55)] sm:max-w-[760px]"
             >
                <DialogHeader className="relative px-5 pt-4 pb-0 text-right">
                   <div className="absolute top-4 end-4 flex items-center gap-2">

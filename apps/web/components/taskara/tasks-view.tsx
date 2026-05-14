@@ -118,12 +118,38 @@ import { cn } from '@/lib/utils';
 import { getProjectColorsFromName, getUserColorsFromName } from '@/lib/name-colors';
 
 const activeStatuses = ['TODO', 'IN_PROGRESS', 'IN_REVIEW', 'BLOCKED'];
+const completedArchiveFetchLimit = 100;
+
+type ArchivedTasksResponse = {
+   items: TaskaraTask[];
+   nextCursor?: string | null;
+};
+
+type TaskArchiveState = {
+   requestKey: string;
+   items: TaskaraTask[];
+   nextCursor: string | null;
+   loading: boolean;
+   error: string | null;
+   complete: boolean;
+};
+
+const emptyTaskArchiveState: TaskArchiveState = {
+   requestKey: '',
+   items: [],
+   nextCursor: null,
+   loading: false,
+   error: null,
+   complete: false,
+};
 const currentTeamFallback = 'all';
 const createIssueShortcutKeys = new Set(['c', 'ز']);
 const hasSystemShortcutModifier = (event: KeyboardEvent) =>
    event.metaKey || event.ctrlKey || event.altKey;
 const assigneeSearchPlaceholder = 'جستجو بین کارمندان...';
 const noAssigneeSearchResult = 'کارمندی پیدا نشد';
+const projectSearchPlaceholder = 'جستجو بین پروژه‌ها...';
+const noProjectSearchResult = 'پروژه‌ای پیدا نشد';
 
 const initialTaskForm = {
    projectId: '',
@@ -216,6 +242,7 @@ function getSystemViewKey(viewKey: ActiveViewKey): SystemViewKey | null {
 const activeViewQueryParam = 'view';
 const activeViewStoragePrefix = 'taskara:tasks-active-view';
 const taskDraftViewStoragePrefix = 'taskara:tasks-draft-view';
+const taskViewOrderStoragePrefix = 'taskara:tasks-view-order';
 const taskComposerPreferenceStoragePrefix = 'taskara:task-composer-preferences';
 const issueListScrollStoragePrefix = 'taskara:issue-list-scroll';
 const issueListScrollSnapshotMaxAgeMs = 30 * 60 * 1000;
@@ -241,8 +268,20 @@ type TaskComposerPreferences = {
    projectId?: string;
 };
 
+type TaskViewChipItem = {
+   active: boolean;
+   count: number;
+   key: ActiveViewKey;
+   label: string;
+   onClick: () => void;
+};
+
 function taskViewSelectionStorageKey(workspaceKey: string, teamKey: string) {
    return `${activeViewStoragePrefix}:${workspaceKey}:${teamKey}`;
+}
+
+function taskViewOrderStorageKey(workspaceKey: string, teamKey: string) {
+   return `${taskViewOrderStoragePrefix}:${workspaceKey}:${teamKey}`;
 }
 
 function taskComposerPreferenceStorageKey(workspaceKey: string, teamKey: string) {
@@ -272,6 +311,32 @@ function readStoredActiveViewKey(workspaceKey: string, teamKey: string): ActiveV
 function writeStoredActiveViewKey(workspaceKey: string, teamKey: string, viewKey: ActiveViewKey) {
    if (typeof window === 'undefined') return;
    window.localStorage.setItem(taskViewSelectionStorageKey(workspaceKey, teamKey), viewKey);
+}
+
+function readStoredTaskViewOrder(workspaceKey: string, teamKey: string): ActiveViewKey[] {
+   if (typeof window === 'undefined') return [];
+   const raw = window.localStorage.getItem(taskViewOrderStorageKey(workspaceKey, teamKey));
+   if (!raw) return [];
+   try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed)
+         ? parsed.filter((item): item is ActiveViewKey => typeof item === 'string')
+         : [];
+   } catch {
+      return [];
+   }
+}
+
+function writeStoredTaskViewOrder(
+   workspaceKey: string,
+   teamKey: string,
+   viewKeys: ActiveViewKey[]
+) {
+   if (typeof window === 'undefined') return;
+   window.localStorage.setItem(
+      taskViewOrderStorageKey(workspaceKey, teamKey),
+      JSON.stringify(viewKeys)
+   );
 }
 
 function readStoredTaskDraftView(
@@ -620,6 +685,38 @@ function mergeTaskViews(primary: TaskaraView[], secondary: TaskaraView[], curren
    );
 }
 
+function orderTaskViewChips(items: TaskViewChipItem[], orderKeys: ActiveViewKey[]) {
+   if (!orderKeys.length) return items;
+
+   const byKey = new Map(items.map((item) => [item.key, item]));
+   const usedKeys = new Set<ActiveViewKey>();
+   const orderedItems: TaskViewChipItem[] = [];
+
+   for (const key of orderKeys) {
+      const item = byKey.get(key);
+      if (!item) continue;
+      orderedItems.push(item);
+      usedKeys.add(key);
+   }
+
+   for (const item of items) {
+      if (!usedKeys.has(item.key)) orderedItems.push(item);
+   }
+
+   return orderedItems;
+}
+
+function moveViewKey(keys: ActiveViewKey[], draggedKey: ActiveViewKey, targetKey: ActiveViewKey) {
+   const fromIndex = keys.indexOf(draggedKey);
+   const toIndex = keys.indexOf(targetKey);
+   if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return keys;
+
+   const nextKeys = [...keys];
+   const [dragged] = nextKeys.splice(fromIndex, 1);
+   nextKeys.splice(toIndex, 0, dragged);
+   return nextKeys;
+}
+
 function compareDateString(a?: string | null, b?: string | null, fallback = 0) {
    if (!a && !b) return fallback;
    if (!a) return 1;
@@ -726,11 +823,42 @@ function taskMatchesQuery(task: TaskaraTask, query: string) {
       .includes(normalizedQuery);
 }
 
+function mergeTasksById(hotTasks: TaskaraTask[], archivedTasks: TaskaraTask[]) {
+   if (archivedTasks.length === 0) return hotTasks;
+   const merged = new Map<string, TaskaraTask>();
+   for (const task of archivedTasks) merged.set(task.id, task);
+   for (const task of hotTasks) merged.set(task.id, task);
+   return [...merged.values()];
+}
+
+function appendUniqueTasks(current: TaskaraTask[], nextItems: TaskaraTask[]) {
+   if (nextItems.length === 0) return current;
+   const seen = new Set(current.map((task) => task.id));
+   const next = [...current];
+   for (const task of nextItems) {
+      if (seen.has(task.id)) continue;
+      seen.add(task.id);
+      next.push(task);
+   }
+   return next;
+}
+
 function filterAssigneeUsers(users: TaskaraUser[], query: string) {
    const normalizedQuery = query.trim().toLocaleLowerCase('fa');
    if (!normalizedQuery) return users;
    return users.filter((user) =>
       [user.name, user.email, user.mattermostUsername || '']
+         .join(' ')
+         .toLocaleLowerCase('fa')
+         .includes(normalizedQuery)
+   );
+}
+
+function filterProjectOptions(projects: TaskaraProject[], query: string) {
+   const normalizedQuery = query.trim().toLocaleLowerCase('fa');
+   if (!normalizedQuery) return projects;
+   return projects.filter((project) =>
+      [project.name, project.keyPrefix, project.team?.name || '']
          .join(' ')
          .toLocaleLowerCase('fa')
          .includes(normalizedQuery)
@@ -802,6 +930,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       views: syncedViews,
       loading,
       error,
+      omittedCompletedBefore,
       refresh: load,
       createTask: createSyncedTask,
       updateTask: updateSyncedTask,
@@ -809,6 +938,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
    } = taskSync;
 
    const [views, setViews] = useState<TaskaraView[]>([]);
+   const [taskArchive, setTaskArchive] = useState<TaskArchiveState>(emptyTaskArchiveState);
    const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
    const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null);
    const [returnHighlightedTaskId, setReturnHighlightedTaskId] = useState<string | null>(null);
@@ -827,6 +957,8 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
    const [draftView, setDraftView] = useState<TaskaraTaskViewState>(() =>
       buildSystemViewState(defaultSystemView, currentTeamKey)
    );
+   const [viewOrderKeys, setViewOrderKeys] = useState<ActiveViewKey[]>([]);
+   const [draggingViewKey, setDraggingViewKey] = useState<ActiveViewKey | null>(null);
    const [filterOpen, setFilterOpen] = useState(false);
    const [displayOpen, setDisplayOpen] = useState(false);
    const [menuAnchor, setMenuAnchor] = useState<MenuAnchor | null>(null);
@@ -982,6 +1114,11 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
    }, [scopedSyncedViews]);
 
    useEffect(() => {
+      setViewOrderKeys(readStoredTaskViewOrder(workspaceKey, viewScopeKey));
+      setDraggingViewKey(null);
+   }, [viewScopeKey, workspaceKey]);
+
+   useEffect(() => {
       if (restoredComposerPreferenceKeyRef.current === composerPreferenceKey) return;
       const stored = readStoredTaskComposerPreferences(workspaceKey, viewScopeKey);
       if (stored) {
@@ -1111,14 +1248,147 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       [projects]
    );
 
+   const completedStatusFilterAllowsArchive =
+      draftView.status.length === 0 ||
+      draftView.status.includes('DONE') ||
+      draftView.status.includes('CANCELED');
+   const shouldLoadCompletedArchive =
+      completedStatusFilterAllowsArchive &&
+      (draftView.completedIssues === 'all' ||
+         draftView.completedIssues === 'week' ||
+         draftView.completedIssues === 'month');
+   const archiveRequestKey = useMemo(() => {
+      if (!shouldLoadCompletedArchive || !omittedCompletedBefore) return '';
+      return JSON.stringify({
+         assigneeIds: [...draftView.assigneeIds].sort(),
+         completedIssues: draftView.completedIssues,
+         labels: [...draftView.labels].sort(),
+         mine: isMyIssuesView,
+         omittedCompletedBefore,
+         priority: [...draftView.priority].sort(),
+         projectIds: [...draftView.projectIds].sort(),
+         query: draftView.query.trim(),
+         status: [...draftView.status].sort(),
+         team: activeTeamSlug || 'all',
+         workspace: workspaceKey,
+      });
+   }, [
+      activeTeamSlug,
+      draftView.assigneeIds,
+      draftView.completedIssues,
+      draftView.labels,
+      draftView.priority,
+      draftView.projectIds,
+      draftView.query,
+      draftView.status,
+      isMyIssuesView,
+      omittedCompletedBefore,
+      shouldLoadCompletedArchive,
+      workspaceKey,
+   ]);
+
+   const loadArchivePage = useCallback(
+      async (reset = false) => {
+         if (!archiveRequestKey || !omittedCompletedBefore) return;
+         const sameRequest = taskArchive.requestKey === archiveRequestKey;
+         if (!reset && sameRequest && (taskArchive.loading || taskArchive.complete)) return;
+
+         const cursor = reset || !sameRequest ? '0' : taskArchive.nextCursor || '0';
+         const existingItems = !reset && sameRequest ? taskArchive.items : [];
+         setTaskArchive({
+            requestKey: archiveRequestKey,
+            items: existingItems,
+            nextCursor: sameRequest ? taskArchive.nextCursor : null,
+            loading: true,
+            error: null,
+            complete: false,
+         });
+
+         const query = new URLSearchParams({
+            completedBefore: omittedCompletedBefore,
+            cursor,
+            limit: String(completedArchiveFetchLimit),
+            teamId: activeTeamSlug || 'all',
+         });
+         if (isMyIssuesView) query.set('mine', 'true');
+         if (draftView.query.trim()) query.set('q', draftView.query.trim());
+         if (draftView.priority.length === 1) query.set('priority', draftView.priority[0]);
+         if (draftView.projectIds.length === 1) query.set('projectId', draftView.projectIds[0]);
+         if (draftView.assigneeIds.length === 1 && draftView.assigneeIds[0] !== 'unassigned') {
+            query.set('assigneeId', draftView.assigneeIds[0]);
+         }
+
+         try {
+            const result = await taskaraRequest<ArchivedTasksResponse>(`/tasks/archive?${query.toString()}`);
+            setTaskArchive((current) => {
+               if (current.requestKey !== archiveRequestKey) return current;
+               const items = appendUniqueTasks(existingItems, result.items);
+               return {
+                  requestKey: archiveRequestKey,
+                  items,
+                  nextCursor: result.nextCursor || null,
+                  loading: false,
+                  error: null,
+                  complete: !result.nextCursor,
+               };
+            });
+         } catch (err) {
+            setTaskArchive((current) => {
+               if (current.requestKey !== archiveRequestKey) return current;
+               return {
+                  ...current,
+                  loading: false,
+                  error: err instanceof Error ? err.message : fa.issue.loadFailed,
+               };
+            });
+         }
+      },
+      [
+         activeTeamSlug,
+         archiveRequestKey,
+         draftView.assigneeIds,
+         draftView.priority,
+         draftView.projectIds,
+         draftView.query,
+         isMyIssuesView,
+         omittedCompletedBefore,
+         taskArchive.complete,
+         taskArchive.items,
+         taskArchive.loading,
+         taskArchive.nextCursor,
+         taskArchive.requestKey,
+      ]
+   );
+
+   useEffect(() => {
+      if (!archiveRequestKey) {
+         setTaskArchive(emptyTaskArchiveState);
+         return;
+      }
+
+      if (taskArchive.requestKey === archiveRequestKey) return;
+      void loadArchivePage(true);
+   }, [archiveRequestKey, loadArchivePage, taskArchive.requestKey]);
+
+   const archivedTasks = taskArchive.requestKey === archiveRequestKey ? taskArchive.items : [];
+   const archiveLoadingForCurrentView = taskArchive.requestKey === archiveRequestKey && taskArchive.loading;
+   const archiveErrorForCurrentView = taskArchive.requestKey === archiveRequestKey ? taskArchive.error : null;
+   const canLoadMoreArchivedTasks = Boolean(
+      archiveRequestKey &&
+         taskArchive.requestKey === archiveRequestKey &&
+         !taskArchive.loading &&
+         taskArchive.nextCursor
+   );
+   const tasksWithArchive = useMemo(() => mergeTasksById(tasks, archivedTasks), [archivedTasks, tasks]);
+
    const scopedTasks = useMemo(() => {
       const teamTasks = activeTeamSlug
-         ? tasks.filter((task) => task.project?.team?.slug === activeTeamSlug)
-         : tasks;
+         ? tasksWithArchive.filter((task) => task.project?.team?.slug === activeTeamSlug)
+         : tasksWithArchive;
       return isMyIssuesView && currentUserId
          ? teamTasks.filter((task) => task.assignee?.id === currentUserId)
          : teamTasks;
-   }, [activeTeamSlug, currentUserId, isMyIssuesView, tasks]);
+   }, [activeTeamSlug, currentUserId, isMyIssuesView, tasksWithArchive]);
 
    useEffect(() => {
       setSelectedTaskId((current) =>
@@ -2020,13 +2290,69 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       }
    }
 
-   const selectedSavedViewCount = useMemo(() => {
-      return activeSavedView
-         ? scopedTasks.filter((task) =>
-              matchesViewState(task, normalizeViewState(activeSavedView.state, currentTeamKey))
-           ).length
-         : 0;
-   }, [activeSavedView, currentTeamKey, scopedTasks]);
+   const savedViewCounts = useMemo(() => {
+      const counts = new Map<string, number>();
+      for (const view of visibleViews) {
+         const viewState = normalizeViewState(view.state, currentTeamKey);
+         counts.set(
+            view.id,
+            scopedTasks.filter((task) => matchesViewState(task, viewState)).length
+         );
+      }
+      return counts;
+   }, [currentTeamKey, scopedTasks, visibleViews]);
+
+   const orderedViewChips = useMemo<TaskViewChipItem[]>(() => {
+      const systemChips = systemViewOrder.map((view): TaskViewChipItem => {
+         const key: ActiveViewKey = `system:${view.key}`;
+         return {
+            active: activeViewKey === key,
+            count: viewCounts[view.key],
+            key,
+            label: view.label,
+            onClick: () => applySystemView(view.key),
+         };
+      });
+      const savedChips = visibleViews.map((view): TaskViewChipItem => ({
+         active: activeViewKey === view.id,
+         count: savedViewCounts.get(view.id) ?? 0,
+         key: view.id,
+         label: view.name,
+         onClick: () => applySavedView(view),
+      }));
+
+      return orderTaskViewChips([...systemChips, ...savedChips], viewOrderKeys);
+   }, [
+      activeViewKey,
+      currentTeamKey,
+      defaultActiveViewKey,
+      location.hash,
+      location.pathname,
+      location.search,
+      savedViewCounts,
+      viewCounts,
+      viewOrderKeys,
+      viewScopeKey,
+      visibleViews,
+      workspaceKey,
+   ]);
+
+   const orderedViewKeys = useMemo(
+      () => orderedViewChips.map((view) => view.key),
+      [orderedViewChips]
+   );
+
+   function handleViewChipDrop(targetKey: ActiveViewKey) {
+      if (!draggingViewKey || draggingViewKey === targetKey) {
+         setDraggingViewKey(null);
+         return;
+      }
+
+      const nextKeys = moveViewKey(orderedViewKeys, draggingViewKey, targetKey);
+      setViewOrderKeys(nextKeys);
+      writeStoredTaskViewOrder(workspaceKey, viewScopeKey, nextKeys);
+      setDraggingViewKey(null);
+   }
 
    const usersForAssignee = useMemo(() => {
       if (!currentUserId) return users;
@@ -2059,26 +2385,26 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                <div className="border-b border-white/6 px-3 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                      <div className="flex flex-wrap items-center gap-2">
-                        {systemViewOrder.map((view) => (
+                        {orderedViewChips.map((view) => (
                            <ViewChip
                               key={view.key}
-                              active={activeViewKey === `system:${view.key}`}
-                              onClick={() => applySystemView(view.key)}
+                              active={view.active}
+                              dragging={draggingViewKey === view.key}
+                              onClick={view.onClick}
+                              onDragEnd={() => setDraggingViewKey(null)}
+                              onDragOver={(event) => {
+                                 event.preventDefault();
+                                 event.dataTransfer.dropEffect = 'move';
+                              }}
+                              onDragStart={(event) => {
+                                 setDraggingViewKey(view.key);
+                                 event.dataTransfer.effectAllowed = 'move';
+                                 event.dataTransfer.setData('text/plain', view.key);
+                              }}
+                              onDrop={() => handleViewChipDrop(view.key)}
                            >
                               {view.label}
-                              <span>{viewCounts[view.key].toLocaleString('fa-IR')}</span>
-                           </ViewChip>
-                        ))}
-                        {visibleViews.map((view) => (
-                           <ViewChip
-                              key={view.id}
-                              active={activeViewKey === view.id}
-                              onClick={() => applySavedView(view)}
-                           >
-                              {view.name}
-                              {activeViewKey === view.id ? (
-                                 <span>{selectedSavedViewCount.toLocaleString('fa-IR')}</span>
-                              ) : null}
+                              <span>{view.count.toLocaleString('fa-IR')}</span>
                            </ViewChip>
                         ))}
                      </div>
@@ -2264,6 +2590,31 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                         ))}
                      </div>
                   )}
+                  {archiveRequestKey ? (
+                     <div className="flex min-h-12 items-center justify-center border-t border-white/5 px-4 py-3 text-xs text-zinc-500">
+                        {archiveLoadingForCurrentView ? (
+                           <span>{fa.app.loading}</span>
+                        ) : archiveErrorForCurrentView ? (
+                           <Button
+                              className="h-8 rounded-md px-3 text-xs"
+                              variant="ghost"
+                              onClick={() => void loadArchivePage(taskArchive.requestKey !== archiveRequestKey)}
+                           >
+                              تلاش دوباره برای کارهای قدیمی‌تر
+                           </Button>
+                        ) : canLoadMoreArchivedTasks ? (
+                           <Button
+                              className="h-8 rounded-md px-3 text-xs"
+                              variant="ghost"
+                              onClick={() => void loadArchivePage(false)}
+                           >
+                              بارگذاری کارهای قدیمی‌تر
+                           </Button>
+                        ) : archivedTasks.length ? (
+                           <span>همه کارهای قدیمی‌تر بارگذاری شده‌اند.</span>
+                        ) : null}
+                     </div>
+                  ) : null}
                </div>
             </main>
          </div>
@@ -2363,7 +2714,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                   'flex max-h-[calc(100svh-32px)] flex-col gap-0 overflow-hidden rounded-[18px] border-white/10 bg-[#1d1d20] p-0 text-zinc-100 shadow-[0_18px_70px_rgb(0_0_0/0.55)]',
                   composerFullscreen
                      ? 'h-[calc(100svh-48px)] max-w-[calc(100vw-48px)] sm:max-w-[calc(100vw-48px)]'
-                     : 'top-[35%] max-w-[920px] sm:max-w-[920px]'
+                     : 'max-w-[920px] sm:max-w-[920px]'
                )}
                onDragEnter={handleComposerDragEnter}
                onDragLeave={handleComposerDragLeave}
@@ -2866,22 +3217,38 @@ function fileKindLabel(file: File): string {
 function ViewChip({
    active,
    children,
+   dragging,
    onClick,
+   onDragEnd,
+   onDragOver,
+   onDragStart,
+   onDrop,
 }: {
    active: boolean;
    children: ReactNode;
+   dragging?: boolean;
    onClick: () => void;
+   onDragEnd: () => void;
+   onDragOver: (event: DragEvent<HTMLButtonElement>) => void;
+   onDragStart: (event: DragEvent<HTMLButtonElement>) => void;
+   onDrop: () => void;
 }) {
    return (
       <button
+         draggable
          className={cn(
-            'inline-flex h-8 items-center gap-2 rounded-full border px-3 text-sm transition',
+            'inline-flex h-8 cursor-grab items-center gap-2 rounded-full border px-3 text-sm transition active:cursor-grabbing',
             active
                ? 'border-white/10 bg-white/8 text-zinc-100'
-               : 'border-white/7 bg-transparent text-zinc-500 hover:bg-white/5 hover:text-zinc-300'
+               : 'border-white/7 bg-transparent text-zinc-500 hover:bg-white/5 hover:text-zinc-300',
+            dragging && 'opacity-45'
          )}
          type="button"
          onClick={onClick}
+         onDragEnd={onDragEnd}
+         onDragOver={onDragOver}
+         onDragStart={onDragStart}
+         onDrop={onDrop}
       >
          {children}
       </button>
@@ -3078,6 +3445,8 @@ function ComposerProjectPill({
    onChange: (projectId: string) => void;
 }) {
    const [open, setOpen] = useState(false);
+   const [query, setQuery] = useState('');
+   const filteredProjects = useMemo(() => filterProjectOptions(projects, query), [projects, query]);
    const handleChange = (nextProjectId: string) => {
       onChange(nextProjectId);
       setOpen(false);
@@ -3093,30 +3462,36 @@ function ComposerProjectPill({
          open={open}
          onOpenChange={setOpen}
       >
-         <LinearMenuSearch title={fa.issue.project} />
+         <ProjectSearchField value={query} onChange={setQuery} />
          {projects.length ? (
             <>
-               {projects.map((item) => (
-                  <LinearMenuOption
-                     key={item.id}
-                     active={project?.id === item.id}
-                     icon={
-                        <ProjectGlyph
-                           name={item.name}
-                           className="size-4 rounded-sm"
-                           iconClassName="size-3"
+               <div className="max-h-72 overflow-y-auto overscroll-contain pe-1">
+                  {filteredProjects.length ? (
+                     filteredProjects.map((item) => (
+                        <LinearMenuOption
+                           key={item.id}
+                           active={project?.id === item.id}
+                           icon={
+                              <ProjectGlyph
+                                 name={item.name}
+                                 className="size-4 rounded-sm"
+                                 iconClassName="size-3"
+                              />
+                           }
+                           label={item.name}
+                           onClick={() => handleChange(item.id)}
                         />
-                     }
-                     label={item.name}
-                     onClick={() => handleChange(item.id)}
+                     ))
+                  ) : (
+                     <div className="px-3 py-2 text-xs text-zinc-500">{noProjectSearchResult}</div>
+                  )}
+                  <LinearMenuOption
+                     active={!project?.id}
+                     icon={<XCircle className="size-4 text-zinc-500" />}
+                     label={fa.app.unset}
+                     onClick={() => handleChange('')}
                   />
-               ))}
-               <LinearMenuOption
-                  active={!project?.id}
-                  icon={<XCircle className="size-4 text-zinc-500" />}
-                  label={fa.app.unset}
-                  onClick={() => handleChange('')}
-               />
+               </div>
             </>
          ) : (
             <div className="px-3 py-2 text-xs text-zinc-500">{fa.issue.projectRequired}</div>
@@ -3238,7 +3613,16 @@ function LinearFloatingPanel({
 
    useEffect(() => {
       const handlePointerDown = (event: PointerEvent) => {
-         if (panelRef.current?.contains(event.target as Node)) return;
+         const target = event.target;
+         if (target instanceof Node && panelRef.current?.contains(target)) return;
+         if (
+            target instanceof HTMLElement &&
+            target.closest(
+               '[data-slot="select-content"], [data-slot="popover-content"], [data-radix-popper-content-wrapper]'
+            )
+         ) {
+            return;
+         }
          onClose();
       };
       const handleKeyDown = (event: KeyboardEvent) => {
@@ -4679,11 +5063,6 @@ function TaskAssigneeControl({
                      <LinearMenuOption
                         key={user.id}
                         active={assignee?.id === user.id}
-                        className={
-                           user.id === currentUserId
-                              ? 'rounded-none border-b-2 border-indigo-400/70'
-                              : undefined
-                        }
                         icon={
                            <LinearAvatar name={user.name} src={user.avatarUrl} className="size-5" />
                         }
@@ -4751,9 +5130,14 @@ function TaskIssueContextMenu({
    const { session } = useAuthSession();
    const currentUserId = session?.user.id || null;
    const [assigneeQuery, setAssigneeQuery] = useState('');
+   const [projectQuery, setProjectQuery] = useState('');
    const filteredUsers = useMemo(
       () => filterAssigneeUsers(users, assigneeQuery),
       [users, assigneeQuery]
+   );
+   const filteredProjects = useMemo(
+      () => filterProjectOptions(projects, projectQuery),
+      [projects, projectQuery]
    );
    const taskLabelNames = labelNames(task);
    const allLabelOptions = [
@@ -4777,6 +5161,7 @@ function TaskIssueContextMenu({
 
    useEffect(() => {
       setAssigneeQuery('');
+      setProjectQuery('');
    }, [task.id]);
 
    return (
@@ -4891,11 +5276,6 @@ function TaskIssueContextMenu({
                         <LinearContextItem
                            key={user.id}
                            active={task.assignee?.id === user.id}
-                           className={
-                              user.id === currentUserId
-                                 ? 'rounded-none border-b-2 border-indigo-400/70'
-                                 : undefined
-                           }
                            icon={
                               <LinearAvatar
                                  name={user.name}
@@ -5003,23 +5383,29 @@ function TaskIssueContextMenu({
                dir="rtl"
                className="w-64 rounded-xl border-white/10 bg-[#202023] p-1 text-zinc-100"
             >
-               <LinearMenuSearch title={fa.issue.project} />
+               <ProjectSearchField value={projectQuery} onChange={setProjectQuery} />
                {projects.length ? (
-                  projects.map((project) => (
-                     <LinearContextItem
-                        key={project.id}
-                        active={task.project?.id === project.id}
-                        icon={
-                           <ProjectGlyph
-                              name={project.name}
-                              className="size-4 rounded-sm"
-                              iconClassName="size-3"
+                  <div className="max-h-72 overflow-y-auto overscroll-contain pe-1">
+                     {filteredProjects.length ? (
+                        filteredProjects.map((project) => (
+                           <LinearContextItem
+                              key={project.id}
+                              active={task.project?.id === project.id}
+                              icon={
+                                 <ProjectGlyph
+                                    name={project.name}
+                                    className="size-4 rounded-sm"
+                                    iconClassName="size-3"
+                                 />
+                              }
+                              label={project.name}
+                              onSelect={() => onProjectChange(project.id)}
                            />
-                        }
-                        label={project.name}
-                        onSelect={() => onProjectChange(project.id)}
-                     />
-                  ))
+                        ))
+                     ) : (
+                        <div className="px-3 py-2 text-xs text-zinc-500">{noProjectSearchResult}</div>
+                     )}
+                  </div>
                ) : (
                   <ContextMenuItem disabled className="text-zinc-500">
                      {fa.issue.projectRequired}
@@ -5110,13 +5496,43 @@ function AssigneeSearchField({
    onChange: (value: string) => void;
 }) {
    return (
+      <PickerSearchField
+         value={value}
+         onChange={onChange}
+         placeholder={assigneeSearchPlaceholder}
+      />
+   );
+}
+
+function ProjectSearchField({
+   value,
+   onChange,
+}: {
+   value: string;
+   onChange: (value: string) => void;
+}) {
+   return (
+      <PickerSearchField value={value} onChange={onChange} placeholder={projectSearchPlaceholder} />
+   );
+}
+
+function PickerSearchField({
+   value,
+   onChange,
+   placeholder,
+}: {
+   value: string;
+   onChange: (value: string) => void;
+   placeholder: string;
+}) {
+   return (
       <div className="border-b border-white/8 p-2">
          <label className="relative block">
             <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-zinc-500" />
             <Input
                value={value}
                onChange={(event) => onChange(event.target.value)}
-               placeholder={assigneeSearchPlaceholder}
+               placeholder={placeholder}
                className="h-8 rounded-md border-white/10 bg-[#1b1b1d] pr-3 pl-8 text-xs text-zinc-200 placeholder:text-zinc-500 focus-visible:ring-indigo-400/40"
                onPointerDown={(event) => event.stopPropagation()}
                onClick={(event) => event.stopPropagation()}

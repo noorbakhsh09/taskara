@@ -25,6 +25,18 @@ const leaderboardQuerySchema = z.object({
   teamId: z.string().min(1).default('all')
 });
 
+const taskArchiveQuerySchema = z.object({
+  projectId: z.string().uuid().optional(),
+  assigneeId: z.string().uuid().optional(),
+  priority: z.enum(['NO_PRIORITY', 'LOW', 'MEDIUM', 'HIGH', 'URGENT']).optional(),
+  teamId: z.string().min(1).default('all'),
+  q: z.string().max(200).optional(),
+  mine: z.coerce.boolean().optional(),
+  completedBefore: z.string().datetime().optional(),
+  cursor: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(100).default(50)
+});
+
 export async function registerTaskRoutes(app: FastifyInstance): Promise<void> {
   app.get('/leaderboard', async (request) => {
     const actor = await getRequestActor(request);
@@ -173,6 +185,69 @@ export async function registerTaskRoutes(app: FastifyInstance): Promise<void> {
       total,
       limit: query.limit,
       offset: query.offset
+    };
+  });
+
+  app.get('/tasks/archive', async (request) => {
+    const actor = await getRequestActor(request);
+    const query = taskArchiveQuerySchema.parse(request.query);
+    const accessibleTeamIds = await listAccessibleTeamIds(actor);
+    const completedBefore = query.completedBefore
+      ? new Date(query.completedBefore)
+      : completedArchiveCutoff();
+    const where: Prisma.TaskWhereInput = {
+      workspaceId: actor.workspace.id,
+      projectId: query.projectId,
+      assigneeId: query.mine ? actor.user.id : query.assigneeId,
+      priority: query.priority,
+      status: { in: ['DONE', 'CANCELED'] },
+      OR: [
+        { completedAt: { lt: completedBefore } },
+        { completedAt: null, updatedAt: { lt: completedBefore } }
+      ]
+    };
+
+    if (query.teamId !== 'all') {
+      await assertActorCanAccessTeamSlug(actor, query.teamId);
+      where.project = {
+        team: {
+          workspaceId: actor.workspace.id,
+          slug: query.teamId
+        }
+      };
+    } else if (accessibleTeamIds) {
+      where.project = { OR: [{ teamId: null }, { teamId: { in: accessibleTeamIds } }] };
+    }
+
+    if (query.q) {
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        {
+          OR: [
+            { key: { contains: query.q.toUpperCase(), mode: 'insensitive' } },
+            { title: { contains: query.q, mode: 'insensitive' } },
+            { description: { contains: query.q, mode: 'insensitive' } }
+          ]
+        }
+      ];
+    }
+
+    const rows = await prisma.task.findMany({
+      where,
+      include: taskInclude,
+      orderBy: [{ completedAt: 'desc' }, { updatedAt: 'desc' }, { id: 'asc' }],
+      take: query.limit + 1,
+      skip: query.cursor
+    });
+    const items = rows.slice(0, query.limit);
+
+    return {
+      items: await addTaskProgressStartedAt(actor.workspace.id, items.map(serializeTaskForResponse)),
+      total: await prisma.task.count({ where }),
+      limit: query.limit,
+      cursor: query.cursor,
+      nextCursor: rows.length > query.limit ? String(query.cursor + query.limit) : null,
+      completedBefore: completedBefore.toISOString()
     };
   });
 
@@ -341,4 +416,8 @@ export async function registerTaskRoutes(app: FastifyInstance): Promise<void> {
 
     return reply.code(201).send(dependency);
   });
+}
+
+function completedArchiveCutoff(): Date {
+  return new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
 }
