@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { CalendarDays, Loader2, Plus, Send, Users, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -64,8 +64,10 @@ export function MeetingsView() {
    const [submitting, setSubmitting] = useState(false);
    const [smsSending, setSmsSending] = useState(false);
    const [smsConfirmOpen, setSmsConfirmOpen] = useState(false);
+   const loadRequestRef = useRef(0);
 
    const load = useCallback(async () => {
+      const requestId = ++loadRequestRef.current;
       setError('');
       try {
          const [meetingResult, projectResult, userResult] = await Promise.all([
@@ -73,21 +75,29 @@ export function MeetingsView() {
             taskaraRequest<TaskaraProject[]>('/projects'),
             taskaraRequest<PaginatedResponse<TaskaraUser>>('/users?limit=200'),
          ]);
+         if (requestId !== loadRequestRef.current) return;
          setMeetings(meetingResult.items);
          setProjects(projectResult);
          setUsers(userResult.items);
       } catch (err) {
-         setError(err instanceof Error ? err.message : fa.meeting.loadFailed);
+         if (requestId === loadRequestRef.current) {
+            setError(err instanceof Error ? err.message : fa.meeting.loadFailed);
+         }
       } finally {
-         setLoading(false);
+         if (requestId === loadRequestRef.current) setLoading(false);
       }
    }, []);
 
    useLiveRefresh(load);
 
    useEffect(() => {
-      const next = meetings.find((item) => item.id === meetingId) || meetings[0] || null;
-      setSelected((current) => (next ? mergeMeetingDetail(current, next) : null));
+      const next = meetingId
+         ? meetings.find((item) => item.id === meetingId) || null
+         : meetings[0] || null;
+      setSelected((current) => {
+         if (next) return mergeMeetingDetail(current, next);
+         return meetingId && current?.id === meetingId ? current : null;
+      });
       if (!meetingId && next && orgId) {
          navigate(`/${orgId}/meetings/${next.id}`, { replace: true });
       }
@@ -97,6 +107,8 @@ export function MeetingsView() {
       let canceled = false;
       async function loadSelected() {
          if (!meetingId) return;
+         setError('');
+         setSelected((current) => (current?.id === meetingId ? current : null));
          setDetailsLoading(true);
          try {
             const result = await taskaraRequest<TaskaraMeeting>(`/meetings/${encodeURIComponent(meetingId)}`);

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { taskaraRequest } from '@/lib/taskara-client';
 import { dispatchWorkspaceRefresh, workspaceRefreshEvent } from '@/lib/live-refresh';
 import type { NotificationSyncResponse, NotificationsResponse, TaskaraNotification } from '@/lib/taskara-types';
@@ -45,6 +45,7 @@ export function useWorkspaceInboxSync(): InboxSyncController {
 
 function useInboxSync(workspaceSlug: string) {
    const cacheKey = useMemo(() => `${inboxCachePrefix}${workspaceSlug}`, [workspaceSlug]);
+   const localReadMarkersRef = useRef(new Map<string, string>());
    const [state, setState] = useState<InboxSyncState>({
       cursor: null,
       items: [],
@@ -73,14 +74,15 @@ function useInboxSync(workspaceSlug: string) {
 
    const applySnapshot = useCallback(
       (snapshot: Omit<InboxSnapshot, 'savedAt'>, loading = false) => {
+         const localSnapshot = applyLocalReadMarkers(snapshot, localReadMarkersRef.current);
          setState({
-            cursor: snapshot.cursor,
-            items: snapshot.items,
+            cursor: localSnapshot.cursor,
+            items: localSnapshot.items,
             loading,
             error: '',
-            unreadCount: snapshot.unreadCount,
+            unreadCount: localSnapshot.unreadCount,
          });
-         saveSnapshot(snapshot);
+         saveSnapshot(localSnapshot);
       },
       [saveSnapshot]
    );
@@ -115,15 +117,13 @@ function useInboxSync(workspaceSlug: string) {
          const result = await taskaraRequest<NotificationSyncResponse>(`/notifications/sync?${params.toString()}`);
          setState((current) => {
             const items = mergeInboxNotifications(current.items, result.items);
-            const next = {
+            const next = applyLocalReadMarkers({
                cursor: result.nextCursor || current.cursor,
                items,
-               loading: false,
-               error: '',
                unreadCount: result.unreadCount,
-            };
+            }, localReadMarkersRef.current);
             saveSnapshot(next);
-            return next;
+            return { ...next, loading: false, error: '' };
          });
       } catch (err) {
          setState((current) => ({
@@ -186,55 +186,97 @@ function useInboxSync(workspaceSlug: string) {
    const markRead = useCallback(
       async (notification: TaskaraNotification) => {
          if (notification.readAt) return;
-         const previous = state;
          const readAt = new Date().toISOString();
-         const nextItems = state.items.map((item) =>
-            sameNotificationThread(item, notification) ? { ...item, readAt: item.readAt || readAt } : item
-         );
-         const nextUnreadCount = Math.max(0, state.unreadCount - 1);
-         setState((current) => ({
-            ...current,
-            items: nextItems,
-            unreadCount: nextUnreadCount,
-         }));
-         saveSnapshot({ cursor: state.cursor, items: nextItems, unreadCount: nextUnreadCount });
+         const threadKey = notificationThreadKey(notification);
+         localReadMarkersRef.current.set(threadKey, readAt);
+
+         setState((current) => {
+            const threadWasUnread = current.items.some(
+               (item) => notificationThreadKey(item) === threadKey && !item.readAt
+            );
+            const nextItems = current.items.map((item) =>
+               notificationThreadKey(item) === threadKey ? { ...item, readAt: item.readAt || readAt } : item
+            );
+            const next = {
+               cursor: current.cursor,
+               items: nextItems,
+               unreadCount: threadWasUnread ? Math.max(0, current.unreadCount - 1) : current.unreadCount,
+            };
+            saveSnapshot(next);
+            return { ...current, ...next };
+         });
 
          try {
             await taskaraRequest(`/notifications/${notification.id}/read`, { method: 'PATCH' });
             dispatchWorkspaceRefresh({ source: 'notifications:read' });
          } catch (err) {
-            setState({
-               ...previous,
-               error: err instanceof Error ? err.message : 'Failed to mark notification as read.',
+            if (localReadMarkersRef.current.get(threadKey) === readAt) {
+               localReadMarkersRef.current.delete(threadKey);
+            }
+            setState((current) => {
+               const nextItems = current.items.map((item) =>
+                  notificationThreadKey(item) === threadKey && item.readAt === readAt ? { ...item, readAt: null } : item
+               );
+               const threadIsCurrentlyUnread = current.items.some(
+                  (item) => notificationThreadKey(item) === threadKey && !item.readAt
+               );
+               const restoredThreadIsUnread = nextItems.some(
+                  (item) => notificationThreadKey(item) === threadKey && !item.readAt
+               );
+               const nextUnreadCount =
+                  restoredThreadIsUnread && !threadIsCurrentlyUnread
+                     ? current.unreadCount + 1
+                     : current.unreadCount;
+               const next = {
+                  cursor: current.cursor,
+                  items: nextItems,
+                  unreadCount: nextUnreadCount,
+               };
+               saveSnapshot(next);
+               return {
+                  ...current,
+                  ...next,
+                  error: err instanceof Error ? err.message : 'Failed to mark notification as read.',
+               };
             });
-            saveSnapshot(previous);
          }
       },
-      [saveSnapshot, state]
+      [saveSnapshot]
    );
 
    const markAllRead = useCallback(async () => {
-      const previous = state;
       const readAt = new Date().toISOString();
-      const nextItems = state.items.map((item) => ({ ...item, readAt: item.readAt || readAt }));
-      setState((current) => ({
-         ...current,
-         items: nextItems,
-         unreadCount: 0,
-      }));
-      saveSnapshot({ cursor: state.cursor, items: nextItems, unreadCount: 0 });
+      const markedThreads = new Map<string, string>();
+      setState((current) => {
+         for (const item of current.items) {
+            const threadKey = notificationThreadKey(item);
+            markedThreads.set(threadKey, readAt);
+            localReadMarkersRef.current.set(threadKey, readAt);
+         }
+         const nextItems = current.items.map((item) => ({ ...item, readAt: item.readAt || readAt }));
+         const next = { cursor: current.cursor, items: nextItems, unreadCount: 0 };
+         saveSnapshot(next);
+         return { ...current, ...next };
+      });
 
       try {
          await taskaraRequest('/notifications/read-all', { method: 'POST', body: JSON.stringify({}) });
          dispatchWorkspaceRefresh({ source: 'notifications:read-all' });
       } catch (err) {
-         setState({
-            ...previous,
-            error: err instanceof Error ? err.message : 'Failed to mark notifications as read.',
+         for (const [threadKey, marker] of markedThreads) {
+            if (localReadMarkersRef.current.get(threadKey) === marker) localReadMarkersRef.current.delete(threadKey);
+         }
+         await refresh();
+         setState((current) => {
+            const next = {
+               ...current,
+               error: err instanceof Error ? err.message : 'Failed to mark notifications as read.',
+            };
+            saveSnapshot({ cursor: next.cursor, items: next.items, unreadCount: next.unreadCount });
+            return next;
          });
-         saveSnapshot(previous);
       }
-   }, [saveSnapshot, state]);
+   }, [refresh, saveSnapshot]);
 
    return {
       error: state.error,
@@ -265,6 +307,40 @@ function mergeInboxNotifications(current: TaskaraNotification[], incoming: Taska
    }
 
    return [...byThread.values()].sort(compareNotificationsByRecency).slice(0, 100);
+}
+
+function applyLocalReadMarkers(
+   snapshot: Omit<InboxSnapshot, 'savedAt'>,
+   localReadMarkers: Map<string, string>
+): Omit<InboxSnapshot, 'savedAt'> {
+   if (localReadMarkers.size === 0) return snapshot;
+
+   let unreadCount = snapshot.unreadCount;
+   let changed = false;
+   const locallyReadUnreadThreads = new Set<string>();
+   const items = snapshot.items.map((item) => {
+      const threadKey = notificationThreadKey(item);
+      const readAt = localReadMarkers.get(threadKey);
+      if (!readAt || !localReadAppliesToNotification(item, readAt)) return item;
+
+      if (!item.readAt && !locallyReadUnreadThreads.has(threadKey)) {
+         unreadCount = Math.max(0, unreadCount - 1);
+         locallyReadUnreadThreads.add(threadKey);
+      }
+
+      if (item.readAt) return item;
+      changed = true;
+      return { ...item, readAt };
+   });
+
+   return changed || unreadCount !== snapshot.unreadCount ? { ...snapshot, items, unreadCount } : snapshot;
+}
+
+function localReadAppliesToNotification(notification: TaskaraNotification, readAt: string): boolean {
+   const notificationTime = Date.parse(notification.createdAt);
+   const readTime = Date.parse(readAt);
+   if (!Number.isFinite(notificationTime) || !Number.isFinite(readTime)) return true;
+   return notificationTime <= readTime;
 }
 
 function cursorFromNotifications(items: TaskaraNotification[]): string | null {

@@ -1,6 +1,6 @@
 'use client';
 
-import { type ChangeEvent, type ComponentType, type FormEvent, type ReactNode, useEffect, useState, useTransition } from 'react';
+import { type ChangeEvent, type ComponentType, type FormEvent, type ReactNode, useEffect, useRef, useState, useTransition } from 'react';
 import {
    ArrowRight,
    Bot,
@@ -537,22 +537,27 @@ function WorkspaceAccessSettingsPage() {
    const [error, setError] = useState('');
    const [loading, setLoading] = useState(true);
    const [isPending, startTransition] = useTransition();
+   const loadRequestRef = useRef(0);
    const isWorkspaceAdmin = me?.role === 'OWNER' || me?.role === 'ADMIN';
    const roleOptions = me?.role === 'OWNER' ? workspaceRoles : workspaceRoles.filter((role) => role !== 'OWNER');
 
    async function load() {
+      const requestId = ++loadRequestRef.current;
       setError('');
       try {
          const [meResult, usersResult] = await Promise.all([
             taskaraRequest<TaskaraMe>('/me'),
             taskaraRequest<PaginatedResponse<TaskaraUser>>('/users?limit=100'),
          ]);
+         if (requestId !== loadRequestRef.current) return;
          setMe(meResult);
          setUsers(usersResult.items);
       } catch (err) {
-         setError(err instanceof Error ? err.message : fa.settings.loadFailed);
+         if (requestId === loadRequestRef.current) {
+            setError(err instanceof Error ? err.message : fa.settings.loadFailed);
+         }
       } finally {
-         setLoading(false);
+         if (requestId === loadRequestRef.current) setLoading(false);
       }
    }
 

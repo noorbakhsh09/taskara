@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, Check, ChevronDown, Trophy } from 'lucide-react';
 import moment from 'moment-jalaali';
 import { LinearAvatar } from '@/components/taskara/linear-ui';
@@ -116,9 +116,11 @@ export function LeaderboardView() {
    const [loading, setLoading] = useState(true);
    const [error, setError] = useState('');
    const [timeRange, setTimeRange] = useState<LeaderboardTimeRange>('daily');
+   const loadRequestRef = useRef(0);
    const timeRangeBounds = useMemo(() => getTimeRangeBounds(timeRange), [timeRange]);
 
    const loadLeaderboard = useCallback(async (bounds: TimeRangeBounds) => {
+      const requestId = ++loadRequestRef.current;
       setLoading(true);
       setError('');
       try {
@@ -128,11 +130,14 @@ export function LeaderboardView() {
             teamId: 'all',
          });
          const response = await taskaraRequest<LeaderboardResponse>(`/leaderboard?${query.toString()}`);
+         if (requestId !== loadRequestRef.current) return;
          setRows(response.items);
       } catch (err) {
-         setError(err instanceof Error ? err.message : fa.leaderboard.loadFailed);
+         if (requestId === loadRequestRef.current) {
+            setError(err instanceof Error ? err.message : fa.leaderboard.loadFailed);
+         }
       } finally {
-         setLoading(false);
+         if (requestId === loadRequestRef.current) setLoading(false);
       }
    }, []);
 

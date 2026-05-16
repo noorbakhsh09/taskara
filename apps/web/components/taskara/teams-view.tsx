@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useTransition } from 'react';
+import { useEffect, useRef, useState, useTransition } from 'react';
 import { Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -38,12 +38,15 @@ export function TeamsView() {
    const [loading, setLoading] = useState(true);
    const [membersLoading, setMembersLoading] = useState(false);
    const [isPending, startTransition] = useTransition();
+   const loadRequestRef = useRef(0);
+   const membersRequestRef = useRef(0);
    const isWorkspaceAdmin = me?.role === 'OWNER' || me?.role === 'ADMIN';
    const selectedTeam = teams.find((team) => team.id === selectedTeamId) || null;
    const memberUserIds = new Set(members.map((member) => member.userId));
    const availableUsers = users.filter((user) => !memberUserIds.has(user.id));
 
    async function load() {
+      const requestId = ++loadRequestRef.current;
       setError('');
       try {
          const [meResult, teamResult, userResult] = await Promise.all([
@@ -51,14 +54,17 @@ export function TeamsView() {
             taskaraRequest<TaskaraTeam[]>('/teams'),
             taskaraRequest<PaginatedResponse<TaskaraUser>>('/users?limit=200'),
          ]);
+         if (requestId !== loadRequestRef.current) return;
          setMe(meResult);
          setTeams(teamResult);
          setUsers(userResult.items);
          setSelectedTeamId((current) => current || teamResult[0]?.id || '');
       } catch (err) {
-         setError(err instanceof Error ? err.message : 'بارگذاری تیم‌ها ناموفق بود.');
+         if (requestId === loadRequestRef.current) {
+            setError(err instanceof Error ? err.message : 'بارگذاری تیم‌ها ناموفق بود.');
+         }
       } finally {
-         setLoading(false);
+         if (requestId === loadRequestRef.current) setLoading(false);
       }
    }
 
@@ -67,19 +73,23 @@ export function TeamsView() {
    }, []);
 
    async function loadMembers(teamId: string) {
+      const requestId = ++membersRequestRef.current;
       if (!teamId) {
          setMembers([]);
+         setMembersLoading(false);
          return;
       }
 
       setMembersLoading(true);
       try {
          const result = await taskaraRequest<PaginatedResponse<TaskaraTeamMember>>(`/teams/${encodeURIComponent(teamId)}/members`);
-         setMembers(result.items);
+         if (requestId === membersRequestRef.current) setMembers(result.items);
       } catch (err) {
-         setError(err instanceof Error ? err.message : 'بارگذاری اعضای تیم ناموفق بود.');
+         if (requestId === membersRequestRef.current) {
+            setError(err instanceof Error ? err.message : 'بارگذاری اعضای تیم ناموفق بود.');
+         }
       } finally {
-         setMembersLoading(false);
+         if (requestId === membersRequestRef.current) setMembersLoading(false);
       }
    }
 

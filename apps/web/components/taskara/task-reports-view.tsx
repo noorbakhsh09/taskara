@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Bot, Loader2, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -61,10 +61,12 @@ export function TaskReportsView() {
    const [submitting, setSubmitting] = useState(false);
    const [error, setError] = useState('');
    const [reportResult, setReportResult] = useState<ReportResponse | null>(null);
+   const reportRequestRef = useRef(0);
 
    const canSubmit = useMemo(() => requestText.trim().length >= 3, [requestText]);
 
    async function handleGenerateReport() {
+      const requestId = ++reportRequestRef.current;
       setError('');
       setReportResult(null);
 
@@ -79,11 +81,13 @@ export function TaskReportsView() {
             method: 'POST',
             body: JSON.stringify({ request: requestText.trim() }),
          });
-         setReportResult(result);
+         if (requestId === reportRequestRef.current) setReportResult(result);
       } catch (err) {
-         setError(err instanceof Error ? err.message : 'گزارش‌گیری ناموفق بود.');
+         if (requestId === reportRequestRef.current) {
+            setError(err instanceof Error ? err.message : 'گزارش‌گیری ناموفق بود.');
+         }
       } finally {
-         setSubmitting(false);
+         if (requestId === reportRequestRef.current) setSubmitting(false);
       }
    }
 

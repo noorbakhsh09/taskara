@@ -932,7 +932,7 @@ class MentionNode extends TextNode {
    createDOM(config: EditorConfig, editor?: LexicalEditor): HTMLElement {
       const dom = super.createDOM(config, editor);
       dom.className =
-         'mx-0.5 inline-flex rounded-full border border-indigo-400/25 bg-indigo-400/12 px-1.5 py-0.5 align-baseline text-[0.92em] !font-medium text-indigo-200';
+         'mx-0.5 inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 align-baseline text-[0.92em] !font-medium text-indigo-700 dark:border-indigo-400/25 dark:bg-indigo-400/12 dark:text-indigo-200';
       dom.dir = 'auto';
       return dom;
    }

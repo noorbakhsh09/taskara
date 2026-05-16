@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Bell, Check, ListChecks, Loader2, Megaphone, Plus, Send, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -95,6 +95,7 @@ export function AnnouncementsView() {
    const [smsConfirmOpen, setSmsConfirmOpen] = useState(false);
    const [pollSelection, setPollSelection] = useState<string[]>([]);
    const [pollVoting, setPollVoting] = useState(false);
+   const loadRequestRef = useRef(0);
    const selectedRecipient = announcementRecipientForUser(selected, currentUserId);
    const selectedIsRead = Boolean(selectedRecipient?.readAt);
    const selectedCanMarkRead = Boolean(selectedRecipient && !selectedRecipient.readAt);
@@ -102,27 +103,36 @@ export function AnnouncementsView() {
    const selectedPollTotalVotes = (selected?.poll?.options || []).reduce((sum, option) => sum + (option._count?.votes || 0), 0);
 
    const load = useCallback(async () => {
+      const requestId = ++loadRequestRef.current;
       setError('');
       try {
          const [announcementResult, userResult] = await Promise.all([
             taskaraRequest<AnnouncementsResponse>('/announcements?limit=100'),
             taskaraRequest<PaginatedResponse<TaskaraUser>>('/users?limit=200'),
          ]);
+         if (requestId !== loadRequestRef.current) return;
          setAnnouncements(announcementResult.items);
          setUnreadCount(announcementResult.unreadCount);
          setUsers(userResult.items);
       } catch (err) {
-         setError(err instanceof Error ? err.message : fa.announcement.loadFailed);
+         if (requestId === loadRequestRef.current) {
+            setError(err instanceof Error ? err.message : fa.announcement.loadFailed);
+         }
       } finally {
-         setLoading(false);
+         if (requestId === loadRequestRef.current) setLoading(false);
       }
    }, []);
 
    useLiveRefresh(load);
 
    useEffect(() => {
-      const next = announcements.find((item) => item.id === announcementId) || announcements[0] || null;
-      setSelected((current) => (next ? mergeAnnouncementDetail(current, next) : null));
+      const next = announcementId
+         ? announcements.find((item) => item.id === announcementId) || null
+         : announcements[0] || null;
+      setSelected((current) => {
+         if (next) return mergeAnnouncementDetail(current, next);
+         return announcementId && current?.id === announcementId ? current : null;
+      });
       if (!announcementId && next && orgId) {
          navigate(`/${orgId}/announcements/${next.id}`, { replace: true });
       }
@@ -132,6 +142,8 @@ export function AnnouncementsView() {
       let canceled = false;
       async function loadSelected() {
          if (!announcementId) return;
+         setError('');
+         setSelected((current) => (current?.id === announcementId ? current : null));
          setDetailsLoading(true);
          try {
             const result = await taskaraRequest<TaskaraAnnouncement>(`/announcements/${encodeURIComponent(announcementId)}`);

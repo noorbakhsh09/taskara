@@ -91,6 +91,11 @@ export function InboxView() {
             return;
          }
 
+         setError('');
+         setSelectedTask(null);
+         setSelectedAnnouncement(null);
+         setSelectedMeeting(null);
+         setActivities([]);
          setDetailsLoading(true);
          try {
             if (notification.announcement) {

@@ -231,6 +231,8 @@ export function IssuePage() {
    );
    const cachedTaskRef = useRef<TaskaraTask | null>(null);
    const syncUsersRef = useRef<TaskaraUser[]>([]);
+   const loadRequestRef = useRef(0);
+   const relatedDocsRequestRef = useRef(0);
 
    const closeIssuePage = useCallback(() => {
       if (returnPath && returnPath !== currentPath) {
@@ -258,14 +260,15 @@ export function IssuePage() {
    }, []);
 
    const loadRelatedDocs = useCallback(async (taskId: string) => {
+      const requestId = ++relatedDocsRequestRef.current;
       try {
          const params = new URLSearchParams({ type: 'TASK', targetId: taskId });
          const references = await taskaraRequest<TaskaraKnowledgeReference[]>(
             `/knowledge/references?${params.toString()}`
          );
-         setRelatedDocs(references);
+         if (requestId === relatedDocsRequestRef.current) setRelatedDocs(references);
       } catch {
-         setRelatedDocs([]);
+         if (requestId === relatedDocsRequestRef.current) setRelatedDocs([]);
       }
    }, []);
 
@@ -307,6 +310,7 @@ export function IssuePage() {
 
    const load = useCallback(async () => {
       if (!taskKey) return;
+      const requestId = ++loadRequestRef.current;
       const cachedTask = cachedTaskRef.current;
       const syncUsers = syncUsersRef.current;
       if (cachedTask) {
@@ -316,6 +320,11 @@ export function IssuePage() {
          if (syncUsers.length) setUsers(syncUsers);
          setLoading(false);
       } else {
+         setTask(null);
+         setActivities([]);
+         setRelatedDocs([]);
+         if (!titleFocusedRef.current) setTitleDraft('');
+         if (!descriptionFocusedRef.current) setDescriptionDraft('');
          setLoading(true);
       }
       setError('');
@@ -338,6 +347,7 @@ export function IssuePage() {
             taskaraRequest<TaskaraProject[]>('/projects').catch(() => []),
             taskaraRequest<TaskaraActivity[]>(`/tasks/${encodeURIComponent(taskKey)}/activity`).catch(() => []),
          ]);
+         if (requestId !== loadRequestRef.current) return;
          setTask(taskResult);
          if (!titleFocusedRef.current) setTitleDraft(taskResult.title);
          if (!descriptionFocusedRef.current) setDescriptionDraft(taskResult.description || '');
@@ -345,9 +355,11 @@ export function IssuePage() {
          setProjects(projectsResult);
          setActivities(activityResult);
       } catch (err) {
-         if (!cachedTask) setError(err instanceof Error ? err.message : fa.issue.loadFailed);
+         if (requestId === loadRequestRef.current && !cachedTask) {
+            setError(err instanceof Error ? err.message : fa.issue.loadFailed);
+         }
       } finally {
-         setLoading(false);
+         if (requestId === loadRequestRef.current) setLoading(false);
       }
    }, [taskKey]);
 
@@ -357,6 +369,7 @@ export function IssuePage() {
 
    useEffect(() => {
       if (!task?.id) {
+         relatedDocsRequestRef.current += 1;
          setRelatedDocs([]);
          return;
       }

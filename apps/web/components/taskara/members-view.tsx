@@ -1,7 +1,7 @@
 'use client';
 
 import type { FormEvent } from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Loader2, Plus, Trash2, UserPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -45,6 +45,7 @@ export function MembersView() {
    const [loading, setLoading] = useState(true);
    const [creating, setCreating] = useState(false);
    const [copyingInviteId, setCopyingInviteId] = useState<string | null>(null);
+   const loadRequestRef = useRef(0);
    const isWorkspaceAdmin = me?.role === 'OWNER' || me?.role === 'ADMIN';
    const roleOptions = useMemo(
       () => (me?.role === 'OWNER' ? workspaceRoles : workspaceRoles.filter((role) => role !== 'OWNER')),
@@ -53,6 +54,7 @@ export function MembersView() {
    const inviteCreated = Boolean(createdInviteUrl);
 
    const load = useCallback(async () => {
+      const requestId = ++loadRequestRef.current;
       setError('');
       try {
          const [meResult, userResult, inviteResult] = await Promise.all([
@@ -65,13 +67,16 @@ export function MembersView() {
                offset: 0,
             })),
          ]);
+         if (requestId !== loadRequestRef.current) return;
          setMe(meResult);
          setUsers(userResult.items);
          setInvites(inviteResult.items);
       } catch (err) {
-         setError(err instanceof Error ? err.message : 'بارگذاری اعضا ناموفق بود.');
+         if (requestId === loadRequestRef.current) {
+            setError(err instanceof Error ? err.message : 'بارگذاری اعضا ناموفق بود.');
+         }
       } finally {
-         setLoading(false);
+         if (requestId === loadRequestRef.current) setLoading(false);
       }
    }, []);
 

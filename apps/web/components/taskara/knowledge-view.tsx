@@ -127,6 +127,7 @@ export function KnowledgeView() {
    const [uploadingInlineAttachments, setUploadingInlineAttachments] = useState(false);
    const autoSaveTimerRef = useRef<number | null>(null);
    const lastAutoSavedDraftKeyRef = useRef<string | null>(null);
+   const pageDetailsRequestRef = useRef(0);
 
    const selectedSpace = useMemo(() => {
       if (!spaces.length) return null;
@@ -194,11 +195,15 @@ export function KnowledgeView() {
 
    useEffect(() => {
       if (!selectedSpace) return;
+      let canceled = false;
       void loadPages(selectedSpace).then((items) => {
-         if (!pageId && items[0]) {
+         if (!canceled && !pageId && items[0]) {
             navigate(`/${workspaceSlug}/wiki/${selectedSpace.key}/${items[0].id}`, { replace: true });
          }
       });
+      return () => {
+         canceled = true;
+      };
    }, [loadPages, navigate, pageId, selectedSpace, workspaceSlug]);
 
    useEffect(() => {
@@ -219,17 +224,21 @@ export function KnowledgeView() {
    }, [pageTree, selectedPage]);
 
    useEffect(() => {
+      const requestId = ++pageDetailsRequestRef.current;
       if (!pageId) {
          setSelectedPage(null);
          setComments([]);
          return;
       }
       const cachedPage = pageDetailsByIdRef.current[pageId] || pagesRef.current.find((page) => page.id === pageId);
-      if (cachedPage && selectedPage?.id !== pageId) {
+      if (cachedPage) {
          hydrateSelectedPage(cachedPage, commentsByPageIdRef.current[pageId] || []);
+      } else {
+         setSelectedPage(null);
+         setComments([]);
       }
       void loadPageDetails(pageId).then((page) => {
-         if (!page) return;
+         if (requestId !== pageDetailsRequestRef.current || !page || page.id !== pageId) return;
          setSelectedPage((current) => {
             if (current?.id === page.id && hasUnsavedPageChangesRef.current) return current;
             setTitleDraft(page.title);
@@ -239,7 +248,7 @@ export function KnowledgeView() {
             return page;
          });
       });
-   }, [loadPageDetails, pageId, selectedPage?.id]);
+   }, [loadPageDetails, pageId]);
 
    useEffect(() => {
       if (!pageId || selectedPage?.id !== pageId) return;

@@ -1,7 +1,7 @@
 'use client';
 
 import type { FormEvent } from 'react';
-import { useCallback, useEffect, useMemo, useState, useTransition } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { BookOpen, ChevronDown, Loader2, Plus } from 'lucide-react';
@@ -52,12 +52,14 @@ export function ProjectsView() {
    const [loading, setLoading] = useState(true);
    const [creatingDocsProjectId, setCreatingDocsProjectId] = useState<string | null>(null);
    const [isPending, startTransition] = useTransition();
+   const loadRequestRef = useRef(0);
    const activeTeam = useMemo(
       () => (activeTeamSlug ? teams.find((team) => team.slug === activeTeamSlug) || null : null),
       [activeTeamSlug, teams]
    );
 
    const load = useCallback(async () => {
+      const requestId = ++loadRequestRef.current;
       setError('');
       try {
          const [projectData, teamData, knowledgeSpaceData] = await Promise.all([
@@ -65,6 +67,7 @@ export function ProjectsView() {
             taskaraRequest<TaskaraTeam[]>('/teams'),
             taskaraRequest<TaskaraKnowledgeSpace[]>('/knowledge/spaces').catch(() => []),
          ]);
+         if (requestId !== loadRequestRef.current) return;
          setProjects(projectData);
          setTeams(teamData);
          setKnowledgeSpaces(knowledgeSpaceData);
@@ -74,9 +77,11 @@ export function ProjectsView() {
             teamId: activeTeam?.id || current.teamId,
          }));
       } catch (err) {
-         setError(err instanceof Error ? err.message : fa.project.loadFailed);
+         if (requestId === loadRequestRef.current) {
+            setError(err instanceof Error ? err.message : fa.project.loadFailed);
+         }
       } finally {
-         setLoading(false);
+         if (requestId === loadRequestRef.current) setLoading(false);
       }
    }, [activeTeamSlug]);
 
