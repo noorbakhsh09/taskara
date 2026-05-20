@@ -1,7 +1,7 @@
 'use client';
 
-import type { ChangeEvent, FormEvent } from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ButtonHTMLAttributes, ChangeEvent, FormEvent } from 'react';
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -1935,29 +1935,41 @@ function IssueSidebarProjectPicker({
    );
 }
 
-function SidebarPickerTrigger({
-   ariaLabel,
-   disabled = false,
-   icon,
-   label,
-   muted = false,
-   open,
-}: {
+type SidebarPickerTriggerProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children'> & {
    ariaLabel: string;
-   disabled?: boolean;
    icon: React.ReactNode;
    label: string;
    muted?: boolean;
    open: boolean;
-}) {
+};
+
+const SidebarPickerTrigger = forwardRef<HTMLButtonElement, SidebarPickerTriggerProps>(function SidebarPickerTrigger(
+   {
+      ariaLabel,
+      className,
+      disabled = false,
+      icon,
+      label,
+      muted = false,
+      open,
+      type,
+      ...buttonProps
+   },
+   ref
+) {
    return (
       <button
+         {...buttonProps}
+         ref={ref}
          aria-expanded={open}
          aria-label={ariaLabel}
-         className="flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg px-2 py-2 text-start transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-60"
+         className={cn(
+            'flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg px-2 py-2 text-start transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-60',
+            className
+         )}
          disabled={disabled}
          role="combobox"
-         type="button"
+         type={type || 'button'}
       >
          <span className="flex size-5 shrink-0 items-center justify-center">{icon}</span>
          <span className={cn('min-w-0 flex-1 truncate text-base', muted ? 'text-zinc-500' : 'text-zinc-100')}>
@@ -1965,7 +1977,7 @@ function SidebarPickerTrigger({
          </span>
       </button>
    );
-}
+});
 
 function SidebarPickerContent({
    children,
