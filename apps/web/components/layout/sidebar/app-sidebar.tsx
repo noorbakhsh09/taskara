@@ -36,7 +36,7 @@ import {
    SidebarTeamIcon,
 } from '@/components/taskara/linear-ui';
 import { TaskaraLogo } from '@/components/taskara/brand-logo';
-import { useLiveRefresh } from '@/lib/live-refresh';
+import { useLiveRefresh, workspaceRefreshSourceMatches, type WorkspaceRefreshDetail } from '@/lib/live-refresh';
 import { taskaraRequest } from '@/lib/taskara-client';
 import { fa } from '@/lib/fa-copy';
 import { isAiEnabledForUserId } from '@/lib/ai-access';
@@ -166,6 +166,19 @@ function movePrimarySidebarItem(
    return nextOrder;
 }
 
+function sidebarRefreshSourceMatches(detail: WorkspaceRefreshDetail) {
+   return (
+      workspaceRefreshSourceMatches(detail, 'announcement') ||
+      workspaceRefreshSourceMatches(detail, 'meeting') ||
+      workspaceRefreshSourceMatches(detail, 'notifications') ||
+      workspaceRefreshSourceMatches(detail, 'project') ||
+      workspaceRefreshSourceMatches(detail, 'task') ||
+      workspaceRefreshSourceMatches(detail, 'task-sync-mutation') ||
+      workspaceRefreshSourceMatches(detail, 'team') ||
+      workspaceRefreshSourceMatches(detail, 'workspace')
+   );
+}
+
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
    const location = useLocation();
    const navigate = useNavigate();
@@ -262,7 +275,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       };
    }, [refreshSidebarData]);
 
-   useLiveRefresh(refreshSidebarData, { fireOnMount: false });
+   useLiveRefresh(refreshSidebarData, {
+      fireOnMount: false,
+      workspaceEventFilter: sidebarRefreshSourceMatches,
+   });
 
    React.useEffect(() => {
       setExpandedTeams(readStoredExpandedTeams(orgId));

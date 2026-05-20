@@ -22,7 +22,7 @@ import { LinearAvatar } from '@/components/taskara/linear-ui';
 import { SmsConfirmDialog } from '@/components/taskara/sms-confirm-dialog';
 import { UserMultiSelectCombobox } from '@/components/taskara/user-multi-select-combobox';
 import { formatJalaliDateTime } from '@/lib/jalali';
-import { dispatchWorkspaceRefresh, useLiveRefresh } from '@/lib/live-refresh';
+import { dispatchWorkspaceRefresh, useLiveRefresh, workspaceRefreshSourceMatches } from '@/lib/live-refresh';
 import { taskaraRequest, uploadMedia } from '@/lib/taskara-client';
 import type { PaginatedResponse, SmsSendSummary, TaskaraMeeting, TaskaraProject, TaskaraUser } from '@/lib/taskara-types';
 import { fa } from '@/lib/fa-copy';
@@ -37,6 +37,7 @@ const emptyMeetingForm = {
    participantIds: [] as string[],
    scheduledAt: '',
 };
+const meetingsRefreshOrigin = 'meetings-view';
 
 function mergeMeetingDetail(current: TaskaraMeeting | null, incoming: TaskaraMeeting): TaskaraMeeting {
    if (!current || current.id !== incoming.id) return incoming;
@@ -88,7 +89,10 @@ export function MeetingsView() {
       }
    }, []);
 
-   useLiveRefresh(load);
+   useLiveRefresh(load, {
+      ignoreWorkspaceEventOrigins: [meetingsRefreshOrigin],
+      workspaceEventFilter: (detail) => workspaceRefreshSourceMatches(detail, 'meeting'),
+   });
 
    useEffect(() => {
       const next = meetingId
@@ -146,7 +150,7 @@ export function MeetingsView() {
          setForm(emptyMeetingForm);
          await load();
          navigate(`/${orgId || 'taskara'}/meetings/${created.id}`);
-         dispatchWorkspaceRefresh({ source: 'meeting:create' });
+         dispatchWorkspaceRefresh({ source: 'meeting:create', origin: meetingsRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.meeting.createFailed);
       } finally {

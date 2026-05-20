@@ -1,7 +1,7 @@
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { taskaraRequest } from '@/lib/taskara-client';
-import { workspaceRefreshEvent } from '@/lib/live-refresh';
+import { workspaceRefreshEvent, workspaceRefreshSourceMatches, type WorkspaceRefreshDetail } from '@/lib/live-refresh';
 import type {
    PaginatedResponse,
    TaskaraKnowledgeComment,
@@ -54,6 +54,7 @@ export type WorkspaceKnowledgeSyncController = {
 const KnowledgeSyncContext = createContext<WorkspaceKnowledgeSyncController | null>(null);
 const knowledgeCachePrefix = 'taskara.knowledge.v1:';
 const knowledgeWarmRefreshIntervalMs = 120000;
+const knowledgeRefreshOrigin = 'knowledge-view';
 
 export function WorkspaceKnowledgeSyncProvider({
    children,
@@ -307,8 +308,9 @@ function useKnowledgeSync(workspaceSlug: string): WorkspaceKnowledgeSyncControll
          if (event.persisted) void refresh();
       };
       const handleWorkspaceRefresh = (event: Event) => {
-         const source = event instanceof CustomEvent ? String(event.detail?.source || '') : '';
-         if (!source || source.startsWith('knowledge:')) void refresh();
+         const detail = workspaceRefreshDetailFromEvent(event);
+         if (detail.origin === knowledgeRefreshOrigin) return;
+         if (workspaceRefreshSourceMatches(detail, 'knowledge')) void refresh();
       };
       const interval = window.setInterval(refreshWarmData, knowledgeWarmRefreshIntervalMs);
 
@@ -344,6 +346,15 @@ function useKnowledgeSync(workspaceSlug: string): WorkspaceKnowledgeSyncControll
       spaces: state.spaces,
       teams: state.teams,
       users: state.users,
+   };
+}
+
+function workspaceRefreshDetailFromEvent(event: Event): WorkspaceRefreshDetail {
+   if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== 'object') return {};
+   const detail = event.detail as WorkspaceRefreshDetail;
+   return {
+      origin: typeof detail.origin === 'string' ? detail.origin : undefined,
+      source: typeof detail.source === 'string' ? detail.source : undefined,
    };
 }
 

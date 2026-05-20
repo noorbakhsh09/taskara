@@ -21,7 +21,7 @@ import { LinearAvatar } from '@/components/taskara/linear-ui';
 import { SmsConfirmDialog } from '@/components/taskara/sms-confirm-dialog';
 import { UserMultiSelectCombobox } from '@/components/taskara/user-multi-select-combobox';
 import { formatJalaliDateTime } from '@/lib/jalali';
-import { dispatchWorkspaceRefresh, useLiveRefresh } from '@/lib/live-refresh';
+import { dispatchWorkspaceRefresh, useLiveRefresh, workspaceRefreshSourceMatches } from '@/lib/live-refresh';
 import { taskaraRequest } from '@/lib/taskara-client';
 import type { AnnouncementsResponse, PaginatedResponse, SmsSendSummary, TaskaraAnnouncement, TaskaraUser } from '@/lib/taskara-types';
 import { fa } from '@/lib/fa-copy';
@@ -30,6 +30,7 @@ import { cn } from '@/lib/utils';
 
 const MIN_POLL_OPTIONS = 2;
 const MAX_POLL_OPTIONS = 12;
+const announcementsRefreshOrigin = 'announcements-view';
 
 type AnnouncementPollDraftForm = {
    enabled: boolean;
@@ -123,7 +124,10 @@ export function AnnouncementsView() {
       }
    }, []);
 
-   useLiveRefresh(load);
+   useLiveRefresh(load, {
+      ignoreWorkspaceEventOrigins: [announcementsRefreshOrigin],
+      workspaceEventFilter: (detail) => workspaceRefreshSourceMatches(detail, 'announcement'),
+   });
 
    useEffect(() => {
       const next = announcementId
@@ -191,7 +195,7 @@ export function AnnouncementsView() {
          setForm(createEmptyForm());
          await load();
          navigate(`/${orgId || 'taskara'}/announcements/${created.id}`);
-         dispatchWorkspaceRefresh({ source: 'announcement:create' });
+         dispatchWorkspaceRefresh({ source: 'announcement:create', origin: announcementsRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.announcement.createFailed);
       } finally {
@@ -207,7 +211,7 @@ export function AnnouncementsView() {
          });
          setSelected(updated);
          await load();
-         dispatchWorkspaceRefresh({ source: 'announcement:read' });
+         dispatchWorkspaceRefresh({ source: 'announcement:read', origin: announcementsRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.announcement.updateFailed);
       }
@@ -253,7 +257,7 @@ export function AnnouncementsView() {
          setAnnouncements((items) => items.map((item) => (item.id === updated.id ? updated : item)));
          toast.success(fa.announcement.publishedToast);
          await load();
-         dispatchWorkspaceRefresh({ source: 'announcement:publish' });
+         dispatchWorkspaceRefresh({ source: 'announcement:publish', origin: announcementsRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.announcement.updateFailed);
       } finally {
@@ -336,7 +340,7 @@ export function AnnouncementsView() {
          setAnnouncements((items) => items.map((item) => (item.id === updated.id ? updated : item)));
          setPollSelection(updated.pollVoteOptionIds || []);
          toast.success(fa.announcement.pollVoteSaved);
-         dispatchWorkspaceRefresh({ source: 'announcement:poll-vote' });
+         dispatchWorkspaceRefresh({ source: 'announcement:poll-vote', origin: announcementsRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.announcement.pollVoteFailed);
       } finally {

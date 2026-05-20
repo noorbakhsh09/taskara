@@ -81,6 +81,7 @@ const emptyPageForm: PageForm = {
 
 const createSpaceSelectValue = '__create_space__';
 const knowledgePageAutoSaveDebounceMs = 1200;
+const knowledgeRefreshOrigin = 'knowledge-view';
 
 export function KnowledgeView() {
    const navigate = useNavigate();
@@ -309,7 +310,7 @@ export function KnowledgeView() {
          setSpaceForm(emptySpaceForm);
          setSpaces([created, ...spaces.filter((space) => space.id !== created.id)]);
          navigate(`/${workspaceSlug}/wiki/${created.key}`);
-         dispatchWorkspaceRefresh({ source: 'knowledge:space:create' });
+         dispatchWorkspaceRefresh({ source: 'knowledge:space:create', origin: knowledgeRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.knowledge.createSpaceFailed);
       } finally {
@@ -368,7 +369,7 @@ export function KnowledgeView() {
          setPage(created);
          void loadPages(selectedSpace, { force: true });
          navigate(`/${workspaceSlug}/wiki/${selectedSpace.key}/${created.id}`);
-         dispatchWorkspaceRefresh({ source: 'knowledge:page:create' });
+         dispatchWorkspaceRefresh({ source: 'knowledge:page:create', origin: knowledgeRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.knowledge.createFailed);
       } finally {
@@ -411,7 +412,7 @@ export function KnowledgeView() {
          setPage(updated);
          setLabelsDraft((updated.labels || []).map((item) => item.label.name).join(', '));
          if (!silent) toast.success(fa.knowledge.saved);
-         dispatchWorkspaceRefresh({ source: 'knowledge:page:update' });
+         dispatchWorkspaceRefresh({ source: 'knowledge:page:update', origin: knowledgeRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.knowledge.updateFailed);
       } finally {
@@ -442,7 +443,7 @@ export function KnowledgeView() {
          const nextPage = remaining.find((page) => page.id !== selectedPage.id);
          navigate(nextPage ? `/${workspaceSlug}/wiki/${selectedSpace.key}/${nextPage.id}` : `/${workspaceSlug}/wiki/${selectedSpace.key}`);
          void loadPages(selectedSpace, { force: true });
-         dispatchWorkspaceRefresh({ source: 'knowledge:page:archive' });
+         dispatchWorkspaceRefresh({ source: 'knowledge:page:archive', origin: knowledgeRefreshOrigin });
       } catch (err) {
          toast.error(err instanceof Error ? err.message : fa.knowledge.updateFailed);
       }
