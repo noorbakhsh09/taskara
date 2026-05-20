@@ -39,7 +39,6 @@ import { TaskaraLogo } from '@/components/taskara/brand-logo';
 import { useLiveRefresh, workspaceRefreshSourceMatches, type WorkspaceRefreshDetail } from '@/lib/live-refresh';
 import { taskaraRequest } from '@/lib/taskara-client';
 import { fa } from '@/lib/fa-copy';
-import { isAiEnabledForUserId } from '@/lib/ai-access';
 import { clearAuthSession, getAuthSession, setAuthSession } from '@/store/auth-store';
 import type { NotificationsResponse, PaginatedResponse, TaskaraMe, TaskaraTask, TaskaraTeam } from '@/lib/taskara-types';
 import type { AnnouncementsResponse, TaskaraMeeting, TaskaraWorkspaceMembership } from '@/lib/taskara-types';
@@ -328,12 +327,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
          { id: 'wiki', title: fa.nav.wiki, href: `/${orgId}/wiki`, icon: BookOpen },
          { id: 'all-tasks', title: fa.nav.allTasks, href: `/${orgId}/tasks`, icon: SidebarIssueIcon, count: allIssueCount },
          { id: 'my-issues', title: fa.nav.myIssues, href: `/${orgId}/team/all/all`, icon: SidebarMyIssuesIcon, count: myIssueCount },
-         ...(isAiEnabledForUserId(me?.user.id)
-            ? [{ id: 'reports', title: fa.nav.reports, href: `/${orgId}/reports`, icon: BarChart3 } satisfies PrimarySidebarItem]
-            : []),
+         { id: 'reports', title: fa.nav.reports, href: `/${orgId}/reports`, icon: BarChart3 },
          { id: 'heartbeat', title: fa.nav.heartbeat, href: `/${orgId}/heartbeat`, icon: Activity },
       ],
-      [allIssueCount, announcementUnreadCount, meetingCount, me?.user.id, myIssueCount, orgId, unreadCount]
+      [allIssueCount, announcementUnreadCount, meetingCount, myIssueCount, orgId, unreadCount]
    );
    const orderedPrimaryItems = React.useMemo(
       () => orderPrimarySidebarItems(primaryItems, primaryItemOrder),

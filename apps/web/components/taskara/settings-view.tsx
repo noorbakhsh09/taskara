@@ -29,14 +29,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { taskaraRequest, uploadMedia } from '@/lib/taskara-client';
-import { isAiEnabledForUserId } from '@/lib/ai-access';
 import { downloadTaskaraFile } from '@/lib/download-file';
 import { formatJalaliDateTime } from '@/lib/jalali';
 import { RoleBadge, workspaceRoles } from '@/lib/taskara-presenters';
 import type { PaginatedResponse, TaskaraMe, TaskaraProject, TaskaraUser } from '@/lib/taskara-types';
 import { fa } from '@/lib/fa-copy';
 import { cn } from '@/lib/utils';
-import { getAuthSession, setAuthSession, useAuthSession } from '@/store/auth-store';
+import { getAuthSession, setAuthSession } from '@/store/auth-store';
 import { EMPTY_SELECT_VALUE, fromSelectValue, toSelectValue } from '@/lib/select-utils';
 
 const settingsSections = ['profile', 'appearance', 'workspace', 'ai', 'members', 'teams', 'projects'] as const;
@@ -97,10 +96,8 @@ function isSettingsSection(value?: string): value is SettingsSection {
 export function SettingsView() {
    const { orgId = 'taskara' } = useParams();
    const location = useLocation();
-   const { session } = useAuthSession();
    const pathParts = location.pathname.split('/').filter(Boolean);
    const requestedSection = pathParts[2];
-   const aiEnabled = isAiEnabledForUserId(session?.user.id);
 
    if (!requestedSection) {
       return <Navigate replace to={`/${orgId}/settings/profile`} />;
@@ -109,12 +106,9 @@ export function SettingsView() {
    if (!isSettingsSection(requestedSection)) {
       return <Navigate replace to={`/${orgId}/settings/profile`} />;
    }
-   if (requestedSection === 'ai' && !aiEnabled) {
-      return <Navigate replace to={`/${orgId}/settings/profile`} />;
-   }
 
    return (
-      <SettingsChrome activeSection={requestedSection} aiEnabled={aiEnabled} orgId={orgId}>
+      <SettingsChrome activeSection={requestedSection} orgId={orgId}>
          {requestedSection === 'profile' ? <ProfileSettingsPage /> : null}
          {requestedSection === 'appearance' ? <AppearanceSettingsPage /> : null}
          {requestedSection === 'workspace' ? <WorkspaceAccessSettingsPage /> : null}
@@ -128,12 +122,10 @@ export function SettingsView() {
 
 function SettingsChrome({
    activeSection,
-   aiEnabled,
    children,
    orgId,
 }: {
    activeSection: SettingsSection;
-   aiEnabled: boolean;
    children: ReactNode;
    orgId: string;
 }) {
@@ -149,7 +141,7 @@ function SettingsChrome({
          title: 'مدیریت',
          items: [
             { title: 'فضای کاری', to: `/${orgId}/settings/workspace`, icon: Building2, section: 'workspace' },
-            ...(aiEnabled ? [{ title: 'هوش مصنوعی', to: `/${orgId}/settings/ai`, icon: Bot, section: 'ai' as const }] : []),
+            { title: 'هوش مصنوعی', to: `/${orgId}/settings/ai`, icon: Bot, section: 'ai' },
             { title: 'اعضا', to: `/${orgId}/settings/members`, icon: UsersRound, section: 'members' },
             { title: 'تیم‌ها', to: `/${orgId}/settings/teams`, icon: UsersRound, section: 'teams' },
             { title: 'پروژه‌ها', to: `/${orgId}/settings/projects`, icon: FolderKanban, section: 'projects' },

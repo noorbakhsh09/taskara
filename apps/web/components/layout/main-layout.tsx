@@ -25,8 +25,6 @@ import { useWorkspaceTaskSync } from '@/lib/task-sync-provider';
 import { taskaraRequest } from '@/lib/taskara-client';
 import type { PaginatedResponse, TaskaraKnowledgePage, TaskaraTask, TaskaraView } from '@/lib/taskara-types';
 import { cn } from '@/lib/utils';
-import { isAiEnabledForUserId } from '@/lib/ai-access';
-import { useAuthSession } from '@/store/auth-store';
 import { Activity, Bell, BookOpen, CalendarDays, FileText, FolderKanban, LayoutTemplate, ListTodo, Megaphone, Plus, Search, Settings, Trophy, Users, UsersRound } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
@@ -110,7 +108,6 @@ function formatViewTarget(view: TaskaraView, teams: Array<{ id: string; slug: st
 export default function MainLayout({ children, header, headersNumber = 2, showSidebar = true }: MainLayoutProps) {
   const navigate = useNavigate();
   const location = useLocation();
-  const { session } = useAuthSession();
   const { tasks, projects, teams, users, views } = useWorkspaceTaskSync();
    const [commandOpen, setCommandOpen] = React.useState(false);
    const [commandQuery, setCommandQuery] = React.useState('');
@@ -453,7 +450,7 @@ export default function MainLayout({ children, header, headersNumber = 2, showSi
                </div>
             </div>
          </div>
-         {isAiEnabledForUserId(session?.user.id) ? <AiAssistantDock /> : null}
+         <AiAssistantDock />
          <CommandDialog
             description={fa.command.description}
             contentClassName="max-w-[760px] sm:max-w-[760px]"

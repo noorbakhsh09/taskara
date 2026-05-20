@@ -3,7 +3,6 @@ import { AlertCircle, Bot, CheckCircle2, Loader2, Mic, MicOff, Send, Sparkles, U
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { isAiEnabledForUserId } from '@/lib/ai-access';
 import { taskaraRequest } from '@/lib/taskara-client';
 import { cn } from '@/lib/utils';
 import { useAuthSession } from '@/store/auth-store';
@@ -59,7 +58,6 @@ const fallbackAiModel = 'x-ai/grok-4.1-fast';
 
 export function AiAssistantDock() {
    const { session } = useAuthSession();
-   const aiEnabled = isAiEnabledForUserId(session?.user.id);
    const [open, setOpen] = React.useState(false);
    const [messages, setMessages] = React.useState<AssistantMessage[]>(initialMessages);
    const [draft, setDraft] = React.useState('');
@@ -76,8 +74,6 @@ export function AiAssistantDock() {
       typeof window !== 'undefined' &&
       typeof MediaRecorder !== 'undefined' &&
       !!navigator.mediaDevices?.getUserMedia;
-
-   if (!aiEnabled) return null;
 
    React.useEffect(() => {
       if (!open) return;
