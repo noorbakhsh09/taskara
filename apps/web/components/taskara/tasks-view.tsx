@@ -991,6 +991,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       users,
       views: syncedViews,
       loading,
+      hasBootstrapped,
       error,
       omittedCompletedBefore,
       refresh: load,
@@ -1044,6 +1045,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
    const viewRestoreRequestKey = `${workspaceKey}:${viewScopeKey}:${location.search}`;
    const scrollRestoreRequestKey = `${location.pathname}${location.search}${location.hash}`;
    const composerPreferenceKey = `${workspaceKey}:${viewScopeKey}`;
+   const showInitialLoading = loading && !hasBootstrapped;
 
    const persistActiveViewSelection = useCallback(
       (viewKey: ActiveViewKey) => {
@@ -1241,7 +1243,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
          return;
       }
 
-      if (loading) return;
+      if (showInitialLoading) return;
 
       setActiveViewKey(defaultActiveViewKey);
       const storedDraftView = readStoredTaskDraftView(
@@ -1262,7 +1264,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       currentTeamKey,
       defaultActiveViewKey,
       defaultSystemView,
-      loading,
+      showInitialLoading,
       location.search,
       viewRestoreRequestKey,
       viewScopeKey,
@@ -1662,7 +1664,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
    }, [scrollRestoreRequestKey]);
 
    useEffect(() => {
-      if (loading) return;
+      if (showInitialLoading) return;
       if (restoredScrollRequestRef.current === scrollRestoreRequestKey) return;
 
       const container = scrollContainerRef.current;
@@ -1709,7 +1711,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
       };
    }, [
       groupedTasks.length,
-      loading,
+      showInitialLoading,
       location.hash,
       location.pathname,
       location.search,
@@ -2552,7 +2554,7 @@ export function TasksView({ defaultSystemView = 'active', personalOnly = true }:
                </div>
 
                <div ref={scrollContainerRef} className="h-[calc(100%-61px)] overflow-auto">
-                  {loading ? (
+                  {showInitialLoading ? (
                      <div className="p-4 text-sm text-zinc-500">{fa.app.loading}</div>
                   ) : activeTeam && scopedProjects.length === 0 && unassignedProjects.length > 0 ? (
                      <TeamProjectAttachEmpty

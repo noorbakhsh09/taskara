@@ -162,7 +162,8 @@ export function useTaskSync(scope: TaskSyncScope) {
    const [omittedCompletedBefore, setOmittedCompletedBefore] = useState<string | null>(null);
    const [loading, setLoading] = useState(true);
    const [error, setError] = useState('');
-   const [syncStatus, setSyncStatus] = useState<TaskSyncStatus>('loading');
+   const [, setSyncStatus] = useState<TaskSyncStatus>('loading');
+   const [hasBootstrapped, setHasBootstrapped] = useState(false);
 
    useEffect(() => {
       scopeRef.current = scope;
@@ -180,9 +181,11 @@ export function useTaskSync(scope: TaskSyncScope) {
          options: TaskSyncRefreshOptions = {}
       ): Promise<boolean> => {
          if (bootstrapRunRef.current !== runId || taskScopeKey(scopeRef.current) !== requestedScopeKey) return false;
+         if (options.preserveVisibleState && compareCursor(result.cursor, cursorRef.current) < 0) return false;
          const hotTasks = pruneColdCompletedTasks(result.tasks, result.omittedCompletedBefore);
          const tasksWithPending = await applyPendingMutationsToTasks(hotTasks, clientId, requestedScopeKey);
          if (bootstrapRunRef.current !== runId || taskScopeKey(scopeRef.current) !== requestedScopeKey) return false;
+         if (options.preserveVisibleState && compareCursor(result.cursor, cursorRef.current) < 0) return false;
          cursorRef.current = result.cursor;
          setCursor(result.cursor);
          setOmittedCompletedBefore(result.omittedCompletedBefore || defaultOmittedCompletedBefore());
@@ -196,6 +199,7 @@ export function useTaskSync(scope: TaskSyncScope) {
             views: result.views,
          });
          bootstrappedRef.current = true;
+         setHasBootstrapped(true);
          lastBootstrappedScopeRef.current = requestedScopeKey;
          return true;
       },
@@ -206,6 +210,9 @@ export function useTaskSync(scope: TaskSyncScope) {
       (events: SyncTaskEvent[], nextCursor: string, broadcast = true) => {
          if (compareCursor(nextCursor, cursorRef.current) < 0) return;
          const taskEvents = events.filter((event) => event.type === 'upsert' || event.type === 'delete' || event.type === 'removeFromScope');
+         const cursorAdvanced = compareCursor(nextCursor, cursorRef.current) > 0;
+
+         if (!taskEvents.length && !cursorAdvanced) return;
 
          if (taskEvents.length) {
             setTasks((current) => {
@@ -243,36 +250,46 @@ export function useTaskSync(scope: TaskSyncScope) {
       bootstrapRunRef.current = runId;
       const requestedScope = scopeRef.current;
       const requestedScopeKey = taskScopeKey(requestedScope);
+      const preserveVisibleState =
+         options.preserveVisibleState ??
+         (bootstrappedRef.current && lastBootstrappedScopeRef.current === requestedScopeKey);
       let restoredFromCache = false;
-      if (!options.preserveVisibleState) setLoading(true);
-      setSyncStatus(options.preserveVisibleState ? 'recovering' : 'loading');
-      setError('');
-      if (!options.preserveVisibleState) bootstrappedRef.current = false;
-      if (!options.preserveVisibleState && lastBootstrappedScopeRef.current !== requestedScopeKey) {
+      if (!preserveVisibleState) setLoading(true);
+      setSyncStatus(preserveVisibleState ? 'recovering' : 'loading');
+      if (!preserveVisibleState) setError('');
+      if (!preserveVisibleState) {
+         bootstrappedRef.current = false;
+         setHasBootstrapped(false);
+      }
+      if (!preserveVisibleState && lastBootstrappedScopeRef.current !== requestedScopeKey) {
          setTasks([]);
          setResources({ projects: [], teams: [], users: [], views: [] });
       }
       try {
-         const cached = await loadCachedBootstrap(requestedScopeKey);
-         if (cached) {
-            restoredFromCache = await applyBootstrap(cached, requestedScopeKey, runId, options);
-            if (restoredFromCache && bootstrapRunRef.current === runId && !options.preserveVisibleState) setLoading(false);
+         if (!preserveVisibleState) {
+            const cached = await loadCachedBootstrap(requestedScopeKey);
+            if (cached) {
+               restoredFromCache = await applyBootstrap(cached, requestedScopeKey, runId, { preserveVisibleState });
+               if (restoredFromCache && bootstrapRunRef.current === runId) setLoading(false);
+            }
          }
 
          const result = await taskaraRequest<BootstrapResponse>(`/sync/bootstrap?${scopeSearch(requestedScope)}`);
-         void saveCachedBootstrap(requestedScopeKey, result);
-         await applyBootstrap(result, requestedScopeKey, runId, options);
+         const applied = await applyBootstrap(result, requestedScopeKey, runId, { preserveVisibleState });
+         if (applied) void saveCachedBootstrap(requestedScopeKey, result);
          if (bootstrapRunRef.current === runId) setSyncStatus('ready');
       } catch (err) {
          if (bootstrapRunRef.current !== runId) return;
-         if (!restoredFromCache) {
+         if (!restoredFromCache && !preserveVisibleState) {
             setError(err instanceof Error ? err.message : 'Task sync failed.');
-            setSyncStatus(isRetryableMutationTransportError(err) ? 'offline' : 'error');
-         } else {
+         }
+         if (restoredFromCache) {
             setSyncStatus('ready');
+         } else {
+            setSyncStatus(isRetryableMutationTransportError(err) ? 'offline' : 'error');
          }
       } finally {
-         if (bootstrapRunRef.current === runId && !options.preserveVisibleState) setLoading(false);
+         if (bootstrapRunRef.current === runId && !preserveVisibleState) setLoading(false);
       }
    }, [applyBootstrap]);
 
@@ -288,7 +305,7 @@ export function useTaskSync(scope: TaskSyncScope) {
             const result = await taskaraRequest<PullResponse>(`/sync/pull?${query.toString()}`);
             if (compareCursor(result.cursor, cursorRef.current) < 0) return;
             if (result.resetRequired) {
-               await refresh();
+               await refresh({ preserveVisibleState: true });
                return;
             }
             applyEvents(result.events, result.cursor);
@@ -296,7 +313,7 @@ export function useTaskSync(scope: TaskSyncScope) {
          }
          setSyncStatus('ready');
       } catch (err) {
-         setError(err instanceof Error ? err.message : 'Task sync pull failed.');
+         if (!bootstrappedRef.current) setError(err instanceof Error ? err.message : 'Task sync pull failed.');
          setSyncStatus(isRetryableMutationTransportError(err) ? 'offline' : 'error');
          if (isUnrecoverableSyncError(err)) void refresh({ preserveVisibleState: true });
       } finally {
@@ -332,6 +349,9 @@ export function useTaskSync(scope: TaskSyncScope) {
          setCursor('0');
          setOmittedCompletedBefore(null);
          setSyncStatus('loading');
+         setHasBootstrapped(false);
+         setLoading(true);
+         setError('');
          setTasks([]);
          setResources({ projects: [], teams: [], users: [], views: [] });
          void refresh();
@@ -524,23 +544,40 @@ export function useTaskSync(scope: TaskSyncScope) {
       [pushMutation, scopeKey]
    );
 
-   return {
-      tasks,
-      projects: resources.projects,
-      teams: resources.teams,
-      users: resources.users,
-      views: resources.views,
-      cursor,
-      omittedCompletedBefore,
-      loading,
-      error,
-      syncStatus,
-      refresh,
-      applyTask,
-      createTask,
-      updateTask,
-      deleteTask,
-   };
+   return useMemo(
+      () => ({
+         tasks,
+         projects: resources.projects,
+         teams: resources.teams,
+         users: resources.users,
+         views: resources.views,
+         omittedCompletedBefore,
+         hasBootstrapped,
+         loading,
+         error,
+         refresh,
+         applyTask,
+         createTask,
+         updateTask,
+         deleteTask,
+      }),
+      [
+         applyTask,
+         createTask,
+         deleteTask,
+         error,
+         hasBootstrapped,
+         loading,
+         omittedCompletedBefore,
+         refresh,
+         resources.projects,
+         resources.teams,
+         resources.users,
+         resources.views,
+         tasks,
+         updateTask,
+      ]
+   );
 }
 
 export function useTaskSyncPulse(onPulse: () => void, enabled = true) {
