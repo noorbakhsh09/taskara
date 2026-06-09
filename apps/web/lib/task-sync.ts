@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { TaskaraClientError, taskaraApiBaseUrl, taskaraRequest, taskaraRequestHeaders } from '@/lib/taskara-client';
 import { dispatchWorkspaceRefresh } from '@/lib/live-refresh';
-import { clearAuthSession } from '@/store/auth-store';
+import { authChangedEvent, authStorageKey, clearAuthSession, getAuthSession } from '@/store/auth-store';
 import type { TaskaraProject, TaskaraTask, TaskaraTeam, TaskaraUser, TaskaraView } from '@/lib/taskara-types';
 
 export type TaskUpdatePatch = {
@@ -125,6 +125,12 @@ type TaskSyncBroadcastMessage =
    | { type: 'localTask'; scopeKey: string; task: TaskaraTask; mutationId?: string }
    | { type: 'localTaskDeleted'; scopeKey: string; taskId?: string; taskKey?: string; mutationId?: string };
 
+type TaskSyncAuthIdentity = {
+   token: string | null;
+   userId: string | null;
+   workspaceSlug: string | null;
+};
+
 export class TaskSyncMutationError extends Error {
    retryable: boolean;
 
@@ -150,6 +156,7 @@ export function useTaskSync(scope: TaskSyncScope) {
    const bootstrappedRef = useRef(false);
    const bootstrapRunRef = useRef(0);
    const lastBootstrappedScopeRef = useRef<string | null>(null);
+   const authIdentityRef = useRef<TaskSyncAuthIdentity>(readTaskSyncAuthIdentity());
    const clientId = useMemo(getOrCreateTaskSyncClientId, []);
    const [tasks, setTasks] = useState<TaskaraTask[]>([]);
    const [resources, setResources] = useState<TaskSyncResources>({
@@ -343,7 +350,16 @@ export function useTaskSync(scope: TaskSyncScope) {
          if (event.persisted) void refresh();
       };
       const handleAuthChanged = (event: Event) => {
-         if (event instanceof StorageEvent && event.key !== 'taskara.auth.session.v1') return;
+         if (event instanceof StorageEvent && event.key !== authStorageKey) return;
+         const previousAuthIdentity = authIdentityRef.current;
+         const nextAuthIdentity = readTaskSyncAuthIdentity();
+         authIdentityRef.current = nextAuthIdentity;
+
+         if (!taskSyncAuthIdentityChanged(previousAuthIdentity, nextAuthIdentity)) {
+            if (bootstrappedRef.current) void refresh({ preserveVisibleState: true });
+            return;
+         }
+
          bootstrappedRef.current = false;
          cursorRef.current = '0';
          setCursor('0');
@@ -357,11 +373,11 @@ export function useTaskSync(scope: TaskSyncScope) {
          void refresh();
       };
       window.addEventListener('pageshow', handlePageShow);
-      window.addEventListener('taskara:auth-changed', handleAuthChanged);
+      window.addEventListener(authChangedEvent, handleAuthChanged);
       window.addEventListener('storage', handleAuthChanged);
       return () => {
          window.removeEventListener('pageshow', handlePageShow);
-         window.removeEventListener('taskara:auth-changed', handleAuthChanged);
+         window.removeEventListener(authChangedEvent, handleAuthChanged);
          window.removeEventListener('storage', handleAuthChanged);
       };
    }, [refresh]);
@@ -965,6 +981,26 @@ function scopeSearchParams(scope: TaskSyncScope): URLSearchParams {
 function currentWorkspaceSlug(): string {
    if (typeof window === 'undefined') return '';
    return window.location.pathname.split('/').filter(Boolean)[0] || '';
+}
+
+function readTaskSyncAuthIdentity(): TaskSyncAuthIdentity {
+   const session = getAuthSession();
+   return {
+      token: session?.token || null,
+      userId: session?.user.id || null,
+      workspaceSlug: session?.workspace?.slug || currentWorkspaceSlug() || null,
+   };
+}
+
+function taskSyncAuthIdentityChanged(
+   previous: TaskSyncAuthIdentity,
+   next: TaskSyncAuthIdentity
+): boolean {
+   return (
+      previous.token !== next.token ||
+      previous.userId !== next.userId ||
+      previous.workspaceSlug !== next.workspaceSlug
+   );
 }
 
 function compareCursor(a: string, b: string): number {
