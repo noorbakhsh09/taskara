@@ -278,7 +278,7 @@ export default function MainLayout({ children, header, headersNumber = 2, showSi
             label: fa.command.goTodayPlan,
             description: fa.pages.todayPlanDescription,
             icon: CalendarCheck2,
-            run: () => navigate(`/${orgId}/today`),
+            run: () => navigate(`/${orgId}/heartbeat`),
          },
          {
             id: 'go-members',

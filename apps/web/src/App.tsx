@@ -16,7 +16,6 @@ import { SettingsView } from '@/components/taskara/settings-view';
 import { TasksView } from '@/components/taskara/tasks-view';
 import { TaskReportsView } from '@/components/taskara/task-reports-view';
 import { TeamsView } from '@/components/taskara/teams-view';
-import { TodayPlanView } from '@/components/taskara/today-plan-view';
 import { fa } from '@/lib/fa-copy';
 import { WorkspaceInboxSyncProvider } from '@/lib/inbox-sync';
 import { WorkspaceKnowledgeSyncProvider } from '@/lib/knowledge-sync';
@@ -160,7 +159,6 @@ export function App() {
         <Route path="wiki/:spaceKey/:pageId" element={<WorkspacePage><KnowledgeView /></WorkspacePage>} />
         <Route path="leaderboard" element={<WorkspacePage><LeaderboardView /></WorkspacePage>} />
         <Route path="heartbeat" element={<WorkspacePage><HeartbeatView /></WorkspacePage>} />
-        <Route path="today" element={<WorkspacePage><TodayPlanView /></WorkspacePage>} />
         <Route path="members" element={<WorkspacePage><MembersView /></WorkspacePage>} />
         <Route path="projects" element={<WorkspacePage><ProjectsView /></WorkspacePage>} />
         <Route path="settings/*" element={<WorkspacePage><SettingsView /></WorkspacePage>} />

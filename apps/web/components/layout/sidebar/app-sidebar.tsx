@@ -47,7 +47,6 @@ import {
    Activity,
    BookOpen,
    BarChart3,
-   CalendarCheck2,
    CalendarDays,
    ChevronDown,
    Laptop,
@@ -74,8 +73,7 @@ type PrimarySidebarItemId =
    | 'all-tasks'
    | 'my-issues'
    | 'reports'
-   | 'heartbeat'
-   | 'today-plan';
+   | 'heartbeat';
 
 type PrimarySidebarItem = {
    id: PrimarySidebarItemId;
@@ -326,7 +324,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
          { id: 'my-issues', title: fa.nav.myIssues, href: `/${orgId}/team/all/all`, icon: SidebarMyIssuesIcon, count: myIssueCount },
          { id: 'reports', title: fa.nav.reports, href: `/${orgId}/reports`, icon: BarChart3 },
          { id: 'heartbeat', title: fa.nav.heartbeat, href: `/${orgId}/heartbeat`, icon: Activity },
-         { id: 'today-plan', title: fa.nav.todayPlan, href: `/${orgId}/today`, icon: CalendarCheck2 },
       ],
       [allIssueCount, announcementUnreadCount, meetingCount, myIssueCount, orgId, unreadCount]
    );
