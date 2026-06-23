@@ -230,7 +230,7 @@ export const fa = {
       noWeight: 'بدون وزن',
       overloadedPeople: 'افراد دارای اضافه‌بار',
       overloadBy: (value: number) => `${value.toLocaleString('fa-IR')} وزن اضافه‌بار`,
-      peopleWorkload: 'بار کاری افراد',
+      peopleWorkload: 'برنامه امروز',
       taskCount: (count: number) => `${count.toLocaleString('fa-IR')} کار`,
       totalWeight: 'وزن کل کارهای امروز و قبل‌تر',
       unassignedTasks: 'کارهای بدون مسئول',
